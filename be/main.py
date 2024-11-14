@@ -138,14 +138,22 @@ async def insert_task(batch_id: str):
                 timestamp = datetime.now() - timedelta(seconds=i)
                 values.append((id_, batch_id, timestamp, value))
 
-            # Insert all values
-            for id_, batch, ts, val in values:
-                await cursor.execute(
-                    'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
-                    (id_, batch, ts, val)
-                )
-            print(f"Inserted {len(values)} rows for batch {batch_id}")
-            return True
+            # Insert all values in a single transaction
+            await cursor.execute('BEGIN')
+            try:
+                for id_, batch, ts, val in values:
+                    await cursor.execute(
+                        'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
+                        (id_, batch, ts, val)
+                    )
+                await cursor.execute('COMMIT')
+                await app.state.db.commit()  # Ensure changes are committed
+                print(f"Inserted {len(values)} rows for batch {batch_id}")
+                return True
+            except Exception as e:
+                print(f"Error during insertion: {str(e)}")
+                await cursor.execute('ROLLBACK')
+                raise
 
     except Exception as e:
         print(f"Error inserting data for batch {batch_id}: {str(e)}")
@@ -155,31 +163,15 @@ async def _insert_task_impl(batch_id: str):
     """Insert test data into the database."""
     print(f"Inserting data for batch {batch_id}")
 
-    async def protected_operation():
-        if batch_id == "test_batch_error":
-            raise RuntimeError("Test error")
+    if batch_id == "test_batch_error":
+        raise RuntimeError("Test error")
 
-        # Simulate longer task duration for testing
-        await asyncio.sleep(0.5)  # Add delay to ensure proper concurrent task testing
-
-        async with app.state.db.cursor() as cursor:
-            await cursor.execute('BEGIN')
-            try:
-                success = await insert_task(batch_id)
-                if success:
-                    await cursor.execute('COMMIT')
-                    await app.state.db.commit()  # Ensure changes are committed
-                    print(f"Data insertion completed for batch {batch_id}")
-                    return True
-                await cursor.execute('ROLLBACK')
-                return False
-            except Exception:
-                await cursor.execute('ROLLBACK')
-                raise
+    # Simulate longer task duration for testing
+    await asyncio.sleep(0.5)  # Add delay to ensure proper concurrent task testing
 
     try:
         # Shield the entire operation from cancellation
-        return await asyncio.shield(protected_operation())
+        return await asyncio.shield(insert_task(batch_id))
     except asyncio.CancelledError:
         print(f"Task {batch_id} was cancelled")
         raise
