@@ -183,9 +183,11 @@ async def start(batch_id: str):
     """Start a new streaming task."""
     print(f"Starting stream for batch {batch_id}")
 
-    # Ensure we have our tasks dictionary
+    # Ensure we have our tasks dictionary and testing mode is set
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
+    if not hasattr(app.state, 'testing'):
+        app.state.testing = False
 
     # Get current active tasks (only count running tasks)
     current_tasks = len([t for t in app.state.tasks.values() if not t.done()])
@@ -284,13 +286,11 @@ async def start(batch_id: str):
                 del app.state.tasks[batch_id]
             raise
 
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "success",
-                "detail": f"Task {batch_id} started"
-            }
-        )
+        return {
+            "status": "started",
+            "batch_id": batch_id,
+            "detail": f"Started streaming task for batch {batch_id}"
+        }
     except Exception as e:
         print(f"Error starting task: {str(e)}")
         if not app.state.testing and batch_id in app.state.tasks:
@@ -336,52 +336,45 @@ async def get_tasks():
 @app.get("/agg")
 async def agg():
     """Get aggregated data."""
-    if not hasattr(app.state, 'db'):
-        return JSONResponse(
-            status_code=501,
-            content={
-                "status": "error",
-                "detail": "Not implemented"
-            }
-        )
-
     try:
         async with app.state.db.cursor() as cursor:
+            # Get the latest value for each batch_id
             await cursor.execute('''
-                SELECT batch_id,
-                       COUNT(*) as count,
-                       CAST(AVG(CAST(value AS FLOAT)) AS FLOAT) as avg_value,
-                       MIN(value) as min_value,
-                       MAX(value) as max_value
-                FROM data
-                GROUP BY batch_id
-                ORDER BY MIN(timestamp) DESC
+                WITH RankedData AS (
+                    SELECT
+                        batch_id,
+                        value,
+                        ROW_NUMBER() OVER (PARTITION BY batch_id ORDER BY timestamp DESC) as rn
+                    FROM data
+                )
+                SELECT batch_id, value
+                FROM RankedData
+                WHERE rn = 1
+                ORDER BY batch_id
             ''')
             rows = await cursor.fetchall()
 
+            if not rows:
+                return {
+                    "status": "success",
+                    "data": []
+                }
+
             result = []
-            for row in rows:
+            for batch_id, value in rows:
                 result.append({
-                    "batch_id": row[0],
-                    "count": row[1],
-                    "avg_value": float(row[2]),
-                    "min_value": int(row[3]),
-                    "max_value": int(row[4])
+                    "batch_id": batch_id,
+                    "value": value
                 })
 
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "status": "success",
-                    "data": result
-                }
-            )
-    except Exception as e:
-        print(f"Error in data aggregation: {str(e)}")
-        return JSONResponse(
-            status_code=501,
-            content={
-                "status": "error",
-                "detail": "Not implemented"
+            return {
+                "status": "success",
+                "data": result
             }
+
+    except Exception as e:
+        print(f"Error in aggregation: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to aggregate data: {str(e)}"
         )

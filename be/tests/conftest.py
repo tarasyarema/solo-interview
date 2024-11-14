@@ -12,6 +12,7 @@ pytestmark = pytest.mark.asyncio
 async def setup_app():
     """Set up the FastAPI test application."""
     app.state.tasks = {}  # Initialize tasks dictionary
+    app.state.testing = True  # Set testing mode for all tests
     try:
         yield app
     finally:
