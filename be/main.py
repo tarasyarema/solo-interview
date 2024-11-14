@@ -1,8 +1,9 @@
-from datetime import datetime, timedelta
 import asyncio
+from datetime import datetime, timedelta
+import uuid
 from contextlib import asynccontextmanager
 import aiosqlite
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -118,46 +119,44 @@ async def root():
             }
         )
 
-async def insert_task(batch_id: str):
+async def insert_task(batch_id: str) -> bool:
     """Insert test data into the database."""
-    if not hasattr(app.state, 'db'):
-        raise RuntimeError("Database not initialized")
-
     try:
-        # Insert 5 rows with descending values (40, 30, 20, 10, 0)
         values = []
+        # Generate test data (5 rows per batch)
+        for i in range(5):
+            # Use deterministic values for testing
+            value = (4 - i) * 10  # Will generate: 40, 30, 20, 10, 0
+            timestamp = datetime.datetime.now() - datetime.timedelta(minutes=i)
+            values.append((
+                str(uuid.uuid4()),
+                batch_id,
+                timestamp.isoformat(),
+                value
+            ))
+
         async with app.state.db.cursor() as cursor:
-            # Get the current max ID
-            await cursor.execute('SELECT COALESCE(MAX(id), 0) FROM data')
-            max_id = (await cursor.fetchone())[0]
-
-            # Generate test values in descending order
-            for i in range(5):
-                id_ = max_id + i + 1
-                value = (4 - i) * 10  # Values: 40, 30, 20, 10, 0
-                timestamp = datetime.now() - timedelta(seconds=i)
-                values.append((id_, batch_id, timestamp, value))
-
-            # Insert all values in a single transaction
+            # Start transaction
             await cursor.execute('BEGIN')
             try:
+                # Insert all values in the batch
                 for id_, batch, ts, val in values:
                     await cursor.execute(
                         'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
                         (id_, batch, ts, val)
                     )
+                # Commit transaction
                 await cursor.execute('COMMIT')
-                await app.state.db.commit()  # Ensure changes are committed
-                print(f"Inserted {len(values)} rows for batch {batch_id}")
+                await app.state.db.commit()
                 return True
             except Exception as e:
                 print(f"Error during insertion: {str(e)}")
                 await cursor.execute('ROLLBACK')
+                await app.state.db.rollback()
                 raise
-
     except Exception as e:
-        print(f"Error inserting data for batch {batch_id}: {str(e)}")
-        raise
+        print(f"Failed to insert data for batch {batch_id}: {str(e)}")
+        return False
 
 async def _insert_task_impl(batch_id: str):
     """Insert test data into the database."""
@@ -166,18 +165,20 @@ async def _insert_task_impl(batch_id: str):
     if batch_id == "test_batch_error":
         raise RuntimeError("Test error")
 
-    # Simulate longer task duration for testing
-    await asyncio.sleep(0.5)  # Add delay to ensure proper concurrent task testing
-
     try:
-        success = await insert_task(batch_id)
-        if success:
-            print(f"Data insertion completed for batch {batch_id}")
-            return True
-        return False
+        # Shield the entire operation from cancellation
+        async with asyncio.timeout(5.0):  # Add timeout to prevent hanging
+            success = await asyncio.shield(insert_task(batch_id))
+            if success:
+                print(f"Data insertion completed for batch {batch_id}")
+                return True
+            return False
     except asyncio.CancelledError:
         print(f"Task {batch_id} was cancelled")
         raise
+    except asyncio.TimeoutError:
+        print(f"Task {batch_id} timed out")
+        raise RuntimeError("Task timed out")
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
         raise
@@ -197,7 +198,10 @@ async def start(batch_id: str):
         if not existing_task.done():
             return JSONResponse(
                 status_code=400,
-                content={"error": f"Task for batch {batch_id} is already running"}
+                content={
+                    "status": "error",
+                    "detail": f"Task for batch {batch_id} is already running"
+                }
             )
         # Clean up completed/failed task
         del app.state.tasks[batch_id]
@@ -209,7 +213,10 @@ async def start(batch_id: str):
         if count > 0:
             return JSONResponse(
                 status_code=400,
-                content={"error": f"Data for batch {batch_id} already exists"}
+                content={
+                    "status": "error",
+                    "detail": f"Data for batch {batch_id} already exists"
+                }
             )
 
     # Get current active tasks (only count running tasks)
@@ -219,7 +226,10 @@ async def start(batch_id: str):
     if current_tasks >= MAX_CONCURRENT_TASKS:
         return JSONResponse(
             status_code=429,
-            content={"error": f"Maximum concurrent tasks ({MAX_CONCURRENT_TASKS}) reached"}
+            content={
+                "status": "error",
+                "detail": f"Maximum concurrent tasks ({MAX_CONCURRENT_TASKS}) reached"
+            }
         )
 
     # Create and start the task with proper shielding
@@ -227,7 +237,8 @@ async def start(batch_id: str):
         # Create a shielded task that will run to completion
         async def protected_task():
             try:
-                return await _insert_task_impl(batch_id)
+                async with asyncio.timeout(10.0):  # Add timeout to prevent hanging
+                    return await asyncio.shield(_insert_task_impl(batch_id))
             except asyncio.CancelledError:
                 print(f"Protected task {batch_id} received cancellation")
                 raise
@@ -235,7 +246,7 @@ async def start(batch_id: str):
                 print(f"Protected task {batch_id} failed: {str(e)}")
                 raise
 
-        task = asyncio.create_task(asyncio.shield(protected_task()))
+        task = asyncio.create_task(protected_task())
         app.state.tasks[batch_id] = task
 
         # Set up done callback
@@ -264,7 +275,10 @@ async def start(batch_id: str):
                 del app.state.tasks[batch_id]
             return JSONResponse(
                 status_code=500,
-                content={"error": f"Failed to start task: {str(e)}"}
+                content={
+                    "status": "error",
+                    "detail": f"Failed to start task: {str(e)}"
+                }
             )
 
         # Check if task failed immediately
@@ -276,10 +290,16 @@ async def start(batch_id: str):
                     del app.state.tasks[batch_id]
                 return JSONResponse(
                     status_code=500,
-                    content={"error": f"Task failed: {str(e)}"}
+                    content={
+                        "status": "error",
+                        "detail": f"Task failed: {str(e)}"
+                    }
                 )
 
-        return {"message": f"Started streaming task for batch {batch_id}"}
+        return {
+            "status": "started",
+            "detail": f"Started streaming task for batch {batch_id}"
+        }
 
     except Exception as e:
         # Clean up if task creation fails
@@ -287,7 +307,10 @@ async def start(batch_id: str):
             del app.state.tasks[batch_id]
         return JSONResponse(
             status_code=500,
-            content={"error": f"Failed to create task: {str(e)}"}
+            content={
+                "status": "error",
+                "detail": f"Failed to create task: {str(e)}"
+            }
         )
 
 @app.delete("/stream/{batch_id}")

@@ -40,15 +40,13 @@ async def clean_tasks():
         tasks = list(app.state.tasks.values())
         for task in tasks:
             if isinstance(task, asyncio.Task) and not task.done():
-                print(f"Waiting for task to complete...")
                 try:
-                    # Increase timeout to allow for transaction completion
-                    await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+                    # Wait for task to complete naturally
+                    await asyncio.wait_for(task, timeout=2.0)
                 except asyncio.TimeoutError:
-                    print(f"Task timed out, cancelling...")
+                    # Only cancel if timeout occurs
                     task.cancel()
                     try:
-                        # Give cancelled tasks a chance to cleanup
                         await asyncio.wait_for(task, timeout=1.0)
                     except (asyncio.CancelledError, asyncio.TimeoutError):
                         pass
