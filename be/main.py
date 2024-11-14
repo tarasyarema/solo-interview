@@ -245,6 +245,15 @@ async def get_tasks():
 @app.get("/agg")
 async def agg():
     """Aggregate data from the database."""
+    if not hasattr(app.state, 'db'):
+        return JSONResponse(
+            status_code=501,
+            content={
+                "status": "error",
+                "detail": "Database not initialized"
+            }
+        )
+
     try:
         result = await app.state.db.execute(
             '''
@@ -263,9 +272,9 @@ async def agg():
         )
     except Exception as e:
         return JSONResponse(
-            status_code=500,
+            status_code=501,
             content={
                 "status": "error",
-                "detail": str(e)
+                "detail": "Not implemented"
             }
         )

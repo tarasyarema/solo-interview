@@ -99,8 +99,9 @@ async def clean_tasks():
         app.state.tasks.clear()
 
 @pytest.fixture
-async def test_db():
+async def test_db(setup_app):
     """Create a test database connection."""
+    # Create a new in-memory database for each test
     conn = duckdb.connect(':memory:')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS data (
@@ -111,5 +112,6 @@ async def test_db():
         )
     ''')
     db = AsyncDuckDBConnection(conn)
+    app.state.db = db  # Set the database in app state
     yield db
     await db.close()

@@ -10,14 +10,14 @@ async def test_data_insertion(test_db, clean_tasks):
     current_time = datetime.now()
 
     # Insert test data
-    test_db.execute(
+    await test_db.execute(
         'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
         (1, batch_id, current_time, value)
     )
 
     # Verify data was inserted
-    result = test_db.execute('SELECT COUNT(*) FROM data WHERE batch_id = ?', [batch_id]).fetchone()
-    assert result[0] == 1
+    result = await test_db.execute('SELECT COUNT(*) FROM data WHERE batch_id = ?', [batch_id])
+    assert result.fetchone()[0] == 1
 
 @pytest.mark.asyncio
 async def test_data_retrieval(test_db, clean_tasks):
@@ -27,19 +27,19 @@ async def test_data_retrieval(test_db, clean_tasks):
     current_time = datetime.now()
 
     # Insert test data
-    test_db.execute(
+    await test_db.execute(
         'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
         (1, batch_id, current_time, value)
     )
 
     # Retrieve and verify data
-    result = test_db.execute(
+    result = await test_db.execute(
         'SELECT value FROM data WHERE batch_id = ?',
         [batch_id]
-    ).fetchone()
-
-    assert result is not None
-    assert result[0] == value
+    )
+    row = result.fetchone()
+    assert row is not None
+    assert row[0] == value
 
 @pytest.mark.asyncio
 async def test_data_aggregation(test_db, clean_tasks):
@@ -51,25 +51,26 @@ async def test_data_aggregation(test_db, clean_tasks):
     for i in range(5):
         value = i * 10
         timestamp = now - timedelta(seconds=i * 10)  # Earlier timestamps have larger values
-        test_db.execute(
+        await test_db.execute(
             'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
             (i + 1, batch_id, timestamp, value)
         )
 
     # Verify data count
-    result = test_db.execute(
+    result = await test_db.execute(
         'SELECT COUNT(*) FROM data WHERE batch_id = ?',
         [batch_id]
-    ).fetchone()
-    assert result[0] == 5
+    )
+    assert result.fetchone()[0] == 5
 
     # Verify data ordering by timestamp DESC (newest first)
-    results = test_db.execute(
+    results = await test_db.execute(
         'SELECT value FROM data WHERE batch_id = ? ORDER BY timestamp DESC',
         [batch_id]
-    ).fetchall()
-    assert len(results) == 5
-    for i, row in enumerate(results):
+    )
+    rows = results.fetchall()
+    assert len(rows) == 5
+    for i, row in enumerate(rows):
         # Since we're ordering by DESC, we expect values in reverse order
         assert row[0] == (4 - i) * 10  # Values should be in reverse order: 40, 30, 20, 10, 0
 
@@ -80,27 +81,27 @@ async def test_data_cleanup(test_db, clean_tasks):
     current_time = datetime.now()
 
     # Insert some test data
-    test_db.execute(
+    await test_db.execute(
         'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
         (1, batch_id, current_time, 42)
     )
 
     # Verify data exists
-    result = test_db.execute(
+    result = await test_db.execute(
         'SELECT COUNT(*) FROM data WHERE batch_id = ?',
         [batch_id]
-    ).fetchone()
-    assert result[0] == 1
+    )
+    assert result.fetchone()[0] == 1
 
     # Clean up data
-    test_db.execute('DELETE FROM data WHERE batch_id = ?', [batch_id])
+    await test_db.execute('DELETE FROM data WHERE batch_id = ?', [batch_id])
 
     # Verify data was cleaned up
-    result = test_db.execute(
+    result = await test_db.execute(
         'SELECT COUNT(*) FROM data WHERE batch_id = ?',
         [batch_id]
-    ).fetchone()
-    assert result[0] == 0
+    )
+    assert result.fetchone()[0] == 0
 
 @pytest.mark.asyncio
 async def test_concurrent_batch_isolation(test_db, clean_tasks):
@@ -110,22 +111,22 @@ async def test_concurrent_batch_isolation(test_db, clean_tasks):
 
     # Insert data for different batches
     for i, batch_id in enumerate(batch_ids):
-        test_db.execute(
+        await test_db.execute(
             'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
             (i + 1, batch_id, current_time, 42)
         )
 
     # Verify each batch has correct data
     for batch_id in batch_ids:
-        result = test_db.execute(
+        result = await test_db.execute(
             'SELECT COUNT(*) FROM data WHERE batch_id = ?',
             [batch_id]
-        ).fetchone()
-        assert result[0] == 1
+        )
+        assert result.fetchone()[0] == 1
 
         # Verify data content
-        value = test_db.execute(
+        value = await test_db.execute(
             'SELECT value FROM data WHERE batch_id = ?',
             [batch_id]
-        ).fetchone()
-        assert value[0] == 42
+        )
+        assert value.fetchone()[0] == 42
