@@ -47,11 +47,12 @@ async def test_task_creation_and_cleanup(test_client, test_db, clean_tasks):
     await asyncio.sleep(0.2)  # Reduced sleep time
 
     # Verify task is running and has inserted data
-    result = test_db.execute(
+    async with test_db.execute(
         'SELECT COUNT(*) FROM data WHERE batch_id = ?',
-        [batch_id]
-    ).fetchone()
-    assert result[0] > 0
+        (batch_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+        assert row[0] > 0
 
     # Verify task is in the tasks dictionary
     assert hasattr(app.state, 'tasks')
@@ -83,11 +84,12 @@ async def test_task_management(test_client, test_db, clean_tasks):
     # Verify all tasks are running and have data
     for batch_id in batch_ids:
         # Check database
-        result = test_db.execute(
+        async with test_db.execute(
             'SELECT COUNT(*) FROM data WHERE batch_id = ?',
-            [batch_id]
-        ).fetchone()
-        assert result[0] > 0
+            (batch_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row[0] > 0
 
         # Check task status
         assert hasattr(app.state, 'tasks')

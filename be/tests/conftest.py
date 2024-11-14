@@ -1,48 +1,12 @@
 import asyncio
 import pytest
 import pytest_asyncio
-import duckdb
+import aiosqlite
 from fastapi.testclient import TestClient
 from main import app
 
 # Use pytest-asyncio's built-in event loop fixture
 pytestmark = pytest.mark.asyncio
-
-class AsyncDuckDBConnection:
-    """Async wrapper for DuckDB connection."""
-    def __init__(self, conn):
-        self.conn = conn
-        self._closed = False
-
-    async def execute(self, query, params=None):
-        """Execute a query asynchronously."""
-        if self._closed:
-            raise RuntimeError("Connection is closed")
-
-        # Use lambda to ensure the query execution happens in the right context
-        def _execute():
-            if params is not None:
-                return self.conn.execute(query, params)
-            return self.conn.execute(query)
-
-        # Execute in thread pool and return result directly
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _execute)
-        return result
-
-    async def close(self):
-        """Close the connection."""
-        if not self._closed:
-            self.conn.close()
-            self._closed = True
-
-    async def __aenter__(self):
-        """Async context manager entry."""
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
-        await self.close()
 
 @pytest_asyncio.fixture(scope="function")
 async def setup_app():
@@ -54,7 +18,7 @@ async def setup_app():
         # Clean up tasks
         if hasattr(app.state, 'tasks'):
             for task in app.state.tasks.values():
-                if not task.done():
+                if isinstance(task, asyncio.Task) and not task.done():
                     task.cancel()
             app.state.tasks = {}
 
@@ -92,26 +56,45 @@ async def clean_tasks():
 @pytest_asyncio.fixture(scope="function")
 async def test_db(setup_app):
     """Create a test database connection."""
-    print("Setting up test database...")  # Debug logging
-    # Create a new in-memory database for each test
-    conn = duckdb.connect(':memory:')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS data (
-            id INTEGER,
-            batch_id VARCHAR,
-            timestamp TIMESTAMP,
-            value INTEGER
-        )
-    ''')
-    db = AsyncDuckDBConnection(conn)
-    print("Database initialized, setting up app state...")  # Debug logging
-    app.state.db = db
-    await db.__aenter__()  # Ensure proper async context initialization
+    db = None
     try:
-        print("Yielding database connection...")  # Debug logging
+        # Create a new in-memory database for each test
+        db = await aiosqlite.connect(':memory:')
+
+        # Create the data table with an index on batch_id
+        async with db.execute('''
+            CREATE TABLE IF NOT EXISTS data (
+                id INTEGER PRIMARY KEY,
+                batch_id TEXT,
+                timestamp DATETIME,
+                value INTEGER
+            )
+        '''):
+            pass
+
+        async with db.execute('CREATE INDEX IF NOT EXISTS idx_batch_id ON data(batch_id)'):
+            pass
+
+        await db.commit()
+
+        # Set the database connection in app state
+        app.state.db = db
+
         yield db
+
+    except Exception as e:
+        print(f"Error setting up database: {str(e)}")
+        if db and not db.closed:
+            await db.close()
+        raise
+
     finally:
-        print("Cleaning up database connection...")  # Debug logging
-        await db.__aexit__(None, None, None)
+        # Clean up database connection
+        if db and not db.closed:
+            try:
+                await db.close()
+            except Exception as e:
+                print(f"Error closing database: {str(e)}")
+
         if hasattr(app.state, 'db'):
             delattr(app.state, 'db')
