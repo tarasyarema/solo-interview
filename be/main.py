@@ -73,11 +73,16 @@ async def root():
             )
 
         result = await app.state.db.execute('SELECT COUNT(*) FROM data')
-        count = result.fetchone()[0] if result else 0
+        row = await result.fetchone()
+        count = row[0] if row and row[0] is not None else 0
+
+        # Only count active tasks
+        active_tasks = len([t for t in app.state.tasks.values()
+                          if isinstance(t, asyncio.Task) and not t.done()])
 
         return {
             "row_count": count,
-            "task_count": len(app.state.tasks),
+            "task_count": active_tasks,
         }
     except Exception as e:
         return JSONResponse(
@@ -118,7 +123,7 @@ async def _insert_task_impl(batch_id: str):
         print(f"Error in insert_task for {batch_id}: {str(e)}")
         if batch_id in app.state.tasks:
             del app.state.tasks[batch_id]
-        raise RuntimeError(str(e))  # Re-raise with explicit error message
+        raise  # Re-raise the original exception for proper error handling
 
 
 @app.post("/stream/{batch_id}")
@@ -160,9 +165,12 @@ async def start(batch_id: str):
                     "detail": f"Task {batch_id} already exists"
                 }
             )
+        # If task exists but is done, remove it
+        del app.state.tasks[batch_id]
 
     # Check concurrent task limit
-    active_tasks = len([t for t in app.state.tasks.values() if isinstance(t, asyncio.Task) and not t.done()])
+    active_tasks = len([t for t in app.state.tasks.values()
+                       if isinstance(t, asyncio.Task) and not t.done()])
     if active_tasks >= MAX_CONCURRENT_TASKS:
         return JSONResponse(
             status_code=429,
@@ -233,28 +241,38 @@ async def get_tasks():
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
-    # Create a copy of tasks for safe iteration
-    tasks_copy = dict(app.state.tasks)
+    # Clean up completed or failed tasks first
+    tasks_to_remove = []
+    for bid, task in app.state.tasks.items():
+        if isinstance(task, asyncio.Task) and task.done():
+            try:
+                task.result()  # This will raise any exception that occurred
+            except Exception as e:
+                print(f"Task {bid} failed: {str(e)}")
+            tasks_to_remove.append(bid)
+    for bid in tasks_to_remove:
+        del app.state.tasks[bid]
 
-    # Create a dictionary of task status
+    # Create a dictionary of task status for remaining tasks
     task_status = {}
-    for batch_id, task in tasks_copy.items():
+    for batch_id, task in app.state.tasks.items():
         if isinstance(task, asyncio.Task):
-            # A task is considered active if it's not done
-            # or if it's done and completed successfully
             if not task.done():
                 task_status[batch_id] = True
             else:
                 try:
                     task.result()  # Check if task completed successfully
                     task_status[batch_id] = True
-                except (asyncio.CancelledError, Exception):
+                except Exception:
                     task_status[batch_id] = False
 
-    return {
-        "status": "success",
-        "tasks": task_status
-    }
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "success",
+            "tasks": task_status
+        }
+    )
 
 
 @app.get("/agg")
@@ -262,34 +280,35 @@ async def agg():
     """Aggregate data from the database."""
     if not hasattr(app.state, 'db'):
         return JSONResponse(
-            status_code=501,  # Not Implemented
+            status_code=500,
             content={
                 "status": "error",
-                "detail": "Not implemented"
+                "detail": "Database not initialized"
             }
         )
 
     try:
         result = await app.state.db.execute(
             '''
-            SELECT SUM(value) as total
+            SELECT value
             FROM data
+            ORDER BY value DESC
             '''
         )
-        row = await result.fetchone()
-        total = row[0] if row and row[0] is not None else 0
+        rows = await result.fetchall()
+        values = [row[0] for row in rows] if rows else []
         return JSONResponse(
             status_code=200,
             content={
                 "status": "success",
-                "total": total
+                "values": values
             }
         )
     except Exception as e:
         return JSONResponse(
-            status_code=501,  # Not Implemented
+            status_code=500,
             content={
                 "status": "error",
-                "detail": "Not implemented"
+                "detail": str(e)
             }
         )
