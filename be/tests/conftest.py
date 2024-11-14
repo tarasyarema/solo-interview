@@ -1,22 +1,23 @@
 import pytest
 import asyncio
 import duckdb
+import httpx
 from fastapi.testclient import TestClient
 from main import app, tasks
 
 @pytest.fixture(scope="function")
-@pytest.mark.asyncio
-async def event_loop():
+def event_loop():
     """Create and provide a new event loop for each test."""
-    loop = asyncio.new_event_loop()
+    policy = asyncio.get_event_loop_policy()
+    loop = policy.new_event_loop()
+    asyncio.set_event_loop(loop)
     yield loop
     loop.close()
 
 @pytest.fixture
 def test_client():
     """Create a test client with extended timeout."""
-    client = TestClient(app, timeout=30.0)
-    return client
+    return TestClient(app, backend_kwargs={'backend_options': {'timeout': httpx.Timeout(30.0)}})
 
 class AsyncDuckDBConnection:
     def __init__(self, connection):
