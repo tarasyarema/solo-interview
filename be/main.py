@@ -84,22 +84,27 @@ async def insert_task(batch_id: str):
         )
         inserted = True
 
-        # Continuous insertion
+        # Continuous insertion until cancelled
         while True:
-            # Check if task is cancelled
-            if asyncio.current_task().cancelled():
+            try:
+                # Check if task is cancelled
+                if asyncio.current_task().cancelled():
+                    print(f"Task {batch_id} was cancelled")
+                    break
+
+                print(f"Inserting data for batch {batch_id}")
+                value = random.randint(0, 100)
+                app.state.db.execute(
+                    'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
+                    (batch_id, dumps({"value": value}), datetime.now())
+                )
+                # Add a longer delay to prevent rapid completion
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
                 print(f"Task {batch_id} was cancelled")
                 if batch_id in tasks:
                     del tasks[batch_id]
                 break
-
-            print(f"Inserting data for batch {batch_id}")
-            value = random.randint(0, 100)
-            app.state.db.execute(
-                'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
-                (batch_id, dumps({"value": value}), datetime.now())
-            )
-            await asyncio.sleep(0.1)
 
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")

@@ -17,7 +17,7 @@ async def test_task_creation_and_cleanup(test_client, test_db, clean_tasks):
     assert data["batch_id"] == batch_id
 
     # Wait for task to start and insert data
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(1.5)  # Increased sleep time to ensure task is running
 
     # Verify task is running and has inserted data
     result = test_db.execute(
@@ -43,7 +43,7 @@ async def test_task_management(test_client, test_db, clean_tasks):
         data = response.json()
         assert data["status"] == "started"
         assert data["batch_id"] == batch_id
-        await asyncio.sleep(0.2)  # Give each task time to start
+        await asyncio.sleep(1.5)  # Increased sleep time to ensure task is running
 
     # Verify all tasks are running and have data
     for batch_id in batch_ids:
@@ -85,7 +85,7 @@ async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
     # Create first task
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
-    await asyncio.sleep(0.2)  # Give task time to start
+    await asyncio.sleep(1.5)  # Increased sleep time to ensure task is running
 
     # Attempt to create duplicate task
     response = test_client.post(f"/stream/{batch_id}")
@@ -107,7 +107,7 @@ async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
     for i in range(MAX_CONCURRENT_TASKS):
         response = test_client.post(f"/stream/batch_{i}")
         assert response.status_code == 200
-        await asyncio.sleep(0.2)  # Give each task time to start
+        await asyncio.sleep(1.5)  # Increased sleep time to ensure task is running
 
     # Attempt to create one more task
     response = test_client.post("/stream/batch_extra")
