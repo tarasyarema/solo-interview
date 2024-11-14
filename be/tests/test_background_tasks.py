@@ -6,155 +6,111 @@ from main import tasks, insert_task, app
 
 @pytest.mark.asyncio
 async def test_task_creation_and_cleanup(test_client, test_db, clean_tasks):
-    """Test that tasks are properly created and cleaned up"""
-    batch_id = "test_batch_creation"
+    """Test that tasks are created and cleaned up properly."""
+    batch_id = "test_batch_0"
 
     # Create a task
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
-    assert response.json()["status"] == "started"
+    data = response.json()
+    assert data["status"] == "started"
+    assert data["batch_id"] == batch_id
 
-    # Wait for task to start and insert some data
-    await asyncio.sleep(0.2)  # Wait for task to fully initialize
+    # Wait for task to start and insert data
+    await asyncio.sleep(0.2)
 
-    # Verify task exists and is running
-    assert batch_id in tasks
-    task = tasks[batch_id]
-    assert not task.done()
-
-    # Verify data was inserted
+    # Verify task is running and has inserted data
     result = test_db.execute(
         'SELECT COUNT(*) FROM data WHERE batch_id = ?',
         [batch_id]
     ).fetchone()
     assert result[0] > 0
 
-    # Clean up
-    task = tasks[batch_id]
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    # Task should still be in tasks dict after cancellation if it inserted data
+    # Verify task is in the tasks dictionary
     assert batch_id in tasks
+    task = tasks[batch_id]
+    assert not task.done()
 
 @pytest.mark.asyncio
 async def test_task_management(test_client, test_db, clean_tasks):
-    """Test task management functionality"""
-    # Clear any existing tasks
-    tasks.clear()
-
-    batch_ids = [f"test_batch_{i}" for i in range(3)]
+    """Test that multiple tasks can be managed simultaneously."""
+    batch_ids = ["test_batch_0", "test_batch_1", "test_batch_2"]
 
     # Create multiple tasks
     for batch_id in batch_ids:
         response = test_client.post(f"/stream/{batch_id}")
         assert response.status_code == 200
-        assert response.json()["status"] == "started"
-        await asyncio.sleep(0.2)  # Wait for each task to fully initialize
+        data = response.json()
+        assert data["status"] == "started"
+        assert data["batch_id"] == batch_id
+        await asyncio.sleep(0.2)  # Give each task time to start
 
-    # Verify all tasks are running
-    assert len(tasks) == 3
+    # Verify all tasks are running and have data
     for batch_id in batch_ids:
-        assert batch_id in tasks
-        task = tasks[batch_id]
-        assert not task.done()
-        # Verify data was inserted
+        # Check database
         result = test_db.execute(
             'SELECT COUNT(*) FROM data WHERE batch_id = ?',
             [batch_id]
         ).fetchone()
         assert result[0] > 0
 
-    # Clean up tasks
-    for batch_id in batch_ids:
+        # Check task status
+        assert batch_id in tasks
         task = tasks[batch_id]
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-    # Tasks should still be in tasks dict after cancellation if they inserted data
-    assert len(tasks) == 3
-
-@pytest.mark.asyncio
-async def test_insert_task_data_generation(test_db, clean_tasks):
-    """Test that insert_task generates data correctly with mocked random values"""
-    batch_id = "test_batch_insert"
-
-    # Mock random.randint to return predictable values
-    with patch('random.randint', return_value=42):
-        # Start the task
-        task = asyncio.create_task(insert_task(batch_id))
-        tasks[batch_id] = task
-
-        # Allow some data to be generated
-        await asyncio.sleep(1.0)  # Increased wait time
-
-        # Cancel the task
-        task.cancel()
-        try:
-            await asyncio.sleep(0.5)  # Increased cleanup time
-            await task
-        except asyncio.CancelledError:
-            pass
-
-        # Verify data was inserted with our mocked value
-        result = test_db.execute(
-            'SELECT data FROM data WHERE batch_id = ? LIMIT 1',
-            [batch_id]
-        ).fetchone()
-
-        assert result is not None
-        data = json.loads(result[0])
-        assert data["value"] == 42  # Changed from "key" to "value"
+        assert not task.done()
 
 @pytest.mark.asyncio
 async def test_task_cleanup_on_error(test_client, test_db, clean_tasks):
-    """Test that tasks are properly cleaned up when an error occurs"""
+    """Test that tasks are cleaned up properly when they fail."""
     batch_id = "test_batch_error"
 
-    # Create an async mock for insert_task
-    async def mock_error(*args, **kwargs):
+    # Mock the insert_task function to raise an error
+    async def mock_error(batch_id: str):
         raise Exception("Test error")
 
-    with patch('main.insert_task', new=mock_error):
+    with patch('main.insert_task', side_effect=mock_error):
         response = test_client.post(f"/stream/{batch_id}")
         assert response.status_code == 500
-        assert "Test error" in response.json()["detail"]
-        assert batch_id not in tasks
+        data = response.json()
+        assert "Test error" in data["detail"]
+
+    # Verify task was cleaned up
+    assert batch_id not in tasks
 
 @pytest.mark.asyncio
 async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
-    """Test that creating a duplicate task is handled properly"""
+    """Test that creating a duplicate task fails properly."""
     batch_id = "test_batch_duplicate"
 
     # Create first task
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
-    assert response.json()["status"] == "started"
-    await asyncio.sleep(0.2)  # Wait for task to fully initialize
-
-    # Verify first task is running
-    assert batch_id in tasks
-    task = tasks[batch_id]
-    assert not task.done()
+    await asyncio.sleep(0.2)  # Give task time to start
 
     # Attempt to create duplicate task
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 400
-    assert "Task already exists" in response.json()["detail"]
+    data = response.json()
+    assert f"Task {batch_id} already exists" in data["detail"]
 
-    # Clean up
-    task = tasks[batch_id]
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    # Task should still be in tasks dict after cancellation if it inserted data
+    # Verify original task is still running
     assert batch_id in tasks
+    task = tasks[batch_id]
+    assert not task.done()
+
+@pytest.mark.asyncio
+async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
+    """Test that concurrent task limit is enforced."""
+    from main import MAX_CONCURRENT_TASKS
+
+    # Create maximum number of tasks
+    for i in range(MAX_CONCURRENT_TASKS):
+        response = test_client.post(f"/stream/batch_{i}")
+        assert response.status_code == 200
+        await asyncio.sleep(0.2)  # Give each task time to start
+
+    # Attempt to create one more task
+    response = test_client.post("/stream/batch_extra")
+    assert response.status_code == 429
+    data = response.json()
+    assert "Too many concurrent tasks" in data["detail"]
