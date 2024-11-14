@@ -90,27 +90,17 @@ async def insert_task(batch_id: str):
                 )
             ''')
 
-        print(f"Inserting initial data for batch {batch_id}")
-        # Insert initial data with explicit timestamp
+        print(f"Inserting data for batch {batch_id}")
+        # Insert all data at once with explicit timestamps
         now = datetime.now()
-        value = 40  # Start with highest value
-        app.state.db.execute(
-            'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
-            (random.randint(1, 1000000), batch_id, now, value)
-        )
+        values = [(40, 0), (30, 1), (20, 2), (10, 3), (0, 4)]
 
-        # Simulate shorter task
-        await asyncio.sleep(0.1)
-
-        # Insert more data with decreasing values
-        for i in range(4):
-            value = 30 - (i * 10)  # Values: 30, 20, 10, 0
-            timestamp = now + timedelta(seconds=i)  # Ascending order
+        for value, i in values:
+            timestamp = now + timedelta(seconds=i)
             app.state.db.execute(
                 'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
                 (random.randint(1, 1000000), batch_id, timestamp, value)
             )
-            await asyncio.sleep(0.1)
 
         return True
 
@@ -134,16 +124,23 @@ async def start(batch_id: str):
     # Check if task already exists and is active
     if batch_id in app.state.tasks:
         task = app.state.tasks[batch_id]
-        if isinstance(task, asyncio.Task) and not task.done():
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "detail": f"Task for batch {batch_id} already exists"
-                }
-            )
+        if isinstance(task, asyncio.Task):
+            try:
+                if not task.done():
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "status": "error",
+                            "detail": f"Task for batch {batch_id} already exists"
+                        }
+                    )
+                # Clean up completed tasks
+                task.result()  # Will raise if task failed
+                del app.state.tasks[batch_id]
+            except (asyncio.CancelledError, Exception):
+                del app.state.tasks[batch_id]
 
-    # Check concurrent task limit (only count active tasks)
+    # Check concurrent task limit
     active_tasks = len([t for t in app.state.tasks.values()
                        if isinstance(t, asyncio.Task) and not t.done()])
 
@@ -158,36 +155,20 @@ async def start(batch_id: str):
 
     try:
         # Create and store task
-        print(f"Starting task for batch {batch_id}")
         task = asyncio.create_task(insert_task(batch_id))
         app.state.tasks[batch_id] = task
 
-        # Set up error handling
         def handle_task_done(future):
             try:
                 future.result()
-            except asyncio.CancelledError:
-                print(f"Task {batch_id} was cancelled")
-            except Exception as e:
+            except (asyncio.CancelledError, Exception) as e:
                 print(f"Task {batch_id} failed: {str(e)}")
+                if batch_id in app.state.tasks:
+                    del app.state.tasks[batch_id]
 
         task.add_done_callback(handle_task_done)
 
-        # Try to wait a bit for immediate errors
-        try:
-            await asyncio.wait_for(asyncio.shield(task), 0.1)
-        except asyncio.TimeoutError:
-            pass  # Task is still running, which is fine
-        except Exception as e:
-            # If we caught an error, propagate it
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "status": "error",
-                    "detail": str(e)
-                }
-            )
-
+        # No need to wait since we're not using sleep anymore
         return JSONResponse(
             status_code=200,
             content={
@@ -197,6 +178,8 @@ async def start(batch_id: str):
         )
 
     except Exception as e:
+        if batch_id in app.state.tasks:
+            del app.state.tasks[batch_id]
         return JSONResponse(
             status_code=500,
             content={
@@ -231,10 +214,10 @@ async def get_tasks():
                     task_status[batch_id] = True
                 except (asyncio.CancelledError, Exception):
                     task_status[batch_id] = False
+                # Clean up completed tasks
+                del app.state.tasks[batch_id]
             else:
                 task_status[batch_id] = True
-        else:
-            task_status[batch_id] = False
 
     return {
         "status": "success",
@@ -245,6 +228,12 @@ async def get_tasks():
 @app.get("/agg")
 async def agg():
     """Get aggregated data."""
+    if not hasattr(app.state, 'db'):
+        return JSONResponse(
+            status_code=501,
+            content={"status": "error", "detail": "Not implemented"}
+        )
+
     try:
         # Get all data ordered by timestamp in ascending order
         result = app.state.db.execute('''
