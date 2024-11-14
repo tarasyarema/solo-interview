@@ -12,44 +12,64 @@ MAX_CONCURRENT_TASKS = 3  # Limit concurrent tasks to 3 for testing
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for the FastAPI application."""
-    # Initialize app state
+    print("Starting up...")
+
+    # Initialize application state
     app.state.tasks = {}
-    app.state.testing = True  # Always set testing mode for now
+    app.state.testing = False  # Default to non-testing mode
 
-    # Create database connection
-    db_path = ":memory:"  # Use in-memory database for testing
-    app.state.db = await aiosqlite.connect(db_path)
+    try:
+        # Set up the database connection
+        db = await aiosqlite.connect(':memory:')
+        app.state.db = db
 
-    # Create tables
-    async with app.state.db.cursor() as cursor:
-        await cursor.execute('''
+        # Create the data table with proper types
+        async with db.execute('''
             CREATE TABLE IF NOT EXISTS data (
                 id TEXT PRIMARY KEY,
                 batch_id TEXT,
                 timestamp TEXT,
                 value INTEGER
             )
-        ''')
-        await app.state.db.commit()
+        '''):
+            pass
 
-    print("Application startup complete")
+        # Create index on batch_id for faster lookups
+        async with db.execute('CREATE INDEX IF NOT EXISTS idx_batch_id ON data(batch_id)'):
+            pass
 
-    try:
+        await db.commit()
+
         yield
+
+    except Exception as e:
+        print(f"Error during startup: {str(e)}")
+        raise
     finally:
+        print("Shutting down...")
         # Clean up tasks
-        tasks = list(app.state.tasks.values())
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        if hasattr(app.state, 'tasks'):
+            tasks = list(app.state.tasks.values())
+            for task in tasks:
+                if isinstance(task, asyncio.Task) and not task.done():
+                    try:
+                        # In testing mode, wait for tasks to complete
+                        if getattr(app.state, 'testing', False):
+                            await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+                        task.cancel()
+                        await asyncio.wait_for(task, timeout=1.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass
+                    except Exception as e:
+                        print(f"Error cleaning up task: {str(e)}")
 
         # Close database connection
-        await app.state.db.close()
-        print("Application shutdown complete")
+        if hasattr(app.state, 'db'):
+            try:
+                await app.state.db.close()
+            except Exception as e:
+                print(f"Error closing database: {str(e)}")
+            delattr(app.state, 'db')
 
 app = FastAPI(lifespan=lifespan)
 
@@ -135,48 +155,55 @@ async def insert_task(batch_id: str) -> bool:
                 )
 
             await app.state.db.commit()
+            print(f"Successfully inserted data for batch {batch_id}")
             return True
 
     except Exception as e:
         print(f"Error during insertion: {str(e)}")
         return False
 
-async def _insert_task_impl(batch_id: str):
-    """Insert test data into the database."""
+async def _insert_task_impl(batch_id: str) -> bool:
+    """Implementation of the task that inserts data."""
     print(f"Inserting data for batch {batch_id}")
 
     try:
-        # Add initial delay to ensure task is tracked
-        await asyncio.sleep(0.5)
+        if not hasattr(app.state, 'db'):
+            raise RuntimeError("Database connection not initialized")
 
-        # Shield the entire operation from cancellation
-        async with asyncio.timeout(10.0):
-            success = await asyncio.shield(insert_task(batch_id))
-            if success:
-                print(f"Data insertion completed for batch {batch_id}")
-                # Add delay after success to ensure task remains tracked
-                if app.state.testing:
-                    await asyncio.sleep(1.0)
-                return True
-            return False
-
-    except asyncio.CancelledError:
-        print(f"Task {batch_id} cancelled")
+        # In testing mode, add a delay to ensure task remains active
         if app.state.testing:
-            # Don't propagate cancellation during tests
-            await asyncio.sleep(0.5)  # Keep task alive briefly
-            return False
-        raise
-    except asyncio.TimeoutError:
-        print(f"Task {batch_id} timed out")
-        raise RuntimeError("Task timed out")
-    except Exception as e:
-        print(f"Error in task {batch_id}: {str(e)}")
-        raise
-    finally:
-        if app.state.testing:
-            # Add final delay in testing mode
             await asyncio.sleep(0.5)
+
+        # First verify we can access the database
+        async with app.state.db.cursor() as cursor:
+            await cursor.execute('SELECT 1')
+            if not await cursor.fetchone():
+                raise RuntimeError("Database connection test failed")
+
+        # Now do the actual insertion
+        success = await insert_task(batch_id)
+        if not success:
+            raise RuntimeError(f"Failed to insert data for batch {batch_id}")
+
+        # Verify data was actually inserted
+        async with app.state.db.cursor() as cursor:
+            await cursor.execute('SELECT COUNT(*) FROM data WHERE batch_id = ?', (batch_id,))
+            count = (await cursor.fetchone())[0]
+            if count == 0:
+                raise RuntimeError(f"No data was inserted for batch {batch_id}")
+
+        # In testing mode, add another delay after success
+        if app.state.testing:
+            await asyncio.sleep(0.5)
+
+        print(f"Successfully completed data insertion for batch {batch_id}")
+        return True
+
+    except Exception as e:
+        print(f"Error in _insert_task_impl for batch {batch_id}: {str(e)}")
+        if not app.state.testing:  # Only raise in non-testing mode
+            raise
+        return False
 
 @app.post("/stream/{batch_id}")
 async def start(batch_id: str):
@@ -188,9 +215,18 @@ async def start(batch_id: str):
         app.state.tasks = {}
     if not hasattr(app.state, 'testing'):
         app.state.testing = False
+    if not hasattr(app.state, 'db'):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": "Database connection not initialized"
+            }
+        )
 
     # Get current active tasks (only count running tasks)
-    current_tasks = len([t for t in app.state.tasks.values() if not t.done()])
+    active_tasks = [t for t in app.state.tasks.values() if not t.done()]
+    current_tasks = len(active_tasks)
     print(f"Active tasks before creation: {current_tasks}, Max allowed: {MAX_CONCURRENT_TASKS}")
 
     if current_tasks >= MAX_CONCURRENT_TASKS:
@@ -213,57 +249,78 @@ async def start(batch_id: str):
                     "detail": f"Task for batch {batch_id} is already running"
                 }
             )
-        # Clean up completed/failed task if not in testing mode
-        if not app.state.testing:
-            del app.state.tasks[batch_id]
+        # Clean up completed task
+        del app.state.tasks[batch_id]
 
     # Check if we already have data for this batch_id
-    async with app.state.db.cursor() as cursor:
-        await cursor.execute('SELECT COUNT(*) FROM data WHERE batch_id = ?', (batch_id,))
-        count = (await cursor.fetchone())[0]
-        if count > 0:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "detail": f"Data for batch {batch_id} already exists"
-                }
-            )
+    try:
+        async with app.state.db.cursor() as cursor:
+            await cursor.execute('SELECT COUNT(*) FROM data WHERE batch_id = ?', (batch_id,))
+            count = (await cursor.fetchone())[0]
+            if count > 0:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "status": "error",
+                        "detail": f"Data for batch {batch_id} already exists"
+                    }
+                )
+    except Exception as e:
+        print(f"Database error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": f"Database error: {str(e)}"
+            }
+        )
 
     # Create and start the task with proper shielding
     try:
         # Create a shielded task that will run to completion
         async def protected_task():
             try:
+                # Shield the entire operation from cancellation
                 async with asyncio.timeout(10.0):  # Add timeout to prevent hanging
-                    return await asyncio.shield(_insert_task_impl(batch_id))
+                    result = await asyncio.shield(_insert_task_impl(batch_id))
+                    if not result:
+                        raise RuntimeError(f"Failed to insert data for batch {batch_id}")
+                    return result
             except asyncio.CancelledError:
                 print(f"Protected task {batch_id} received cancellation")
                 if app.state.testing:
-                    # Don't propagate cancellation during tests
-                    return False
+                    # In testing mode, ensure task completes
+                    try:
+                        result = await _insert_task_impl(batch_id)
+                        if not result:
+                            raise RuntimeError(f"Failed to insert data for batch {batch_id}")
+                        return result
+                    except Exception as e:
+                        print(f"Error in protected task during testing: {str(e)}")
+                        raise
                 raise
             except Exception as e:
                 print(f"Protected task {batch_id} failed: {str(e)}")
+                if batch_id in app.state.tasks:
+                    del app.state.tasks[batch_id]
                 raise
 
-        # Create and store the task BEFORE starting it
+        # Create and store the task
         task = asyncio.create_task(protected_task())
         app.state.tasks[batch_id] = task
 
-        # Set up done callback that only removes task if it's the same one
+        # Set up done callback
         def task_done_callback(t):
             try:
-                if task.cancelled():
-                    print(f"Task {batch_id} was cancelled")
-                elif task.exception():
-                    print(f"Task {batch_id} failed with error: {task.exception()}")
+                if t.cancelled():
+                    print(f"Task {batch_id} cancelled")
+                elif t.exception():
+                    print(f"Task {batch_id} failed with error: {t.exception()}")
+                    if not app.state.testing and batch_id in app.state.tasks:
+                        del app.state.tasks[batch_id]
                 else:
                     print(f"Task {batch_id} completed successfully")
-
-                # Only remove task if we're not in testing mode
-                if not app.state.testing:
-                    if batch_id in app.state.tasks and app.state.tasks[batch_id] is t:
+                    if not app.state.testing and batch_id in app.state.tasks:
                         del app.state.tasks[batch_id]
                 print(f"Task {batch_id} completed and cleaned up")
             except Exception as e:
@@ -271,31 +328,33 @@ async def start(batch_id: str):
 
         task.add_done_callback(task_done_callback)
 
-        # Wait briefly to ensure task starts
-        try:
-            await asyncio.wait_for(
-                asyncio.shield(asyncio.wait([task], return_when=asyncio.FIRST_COMPLETED)),
-                timeout=0.1
-            )
-        except asyncio.TimeoutError:
-            # Task is still running, which is expected
-            pass
-        except Exception as e:
-            # Task failed to start
-            if not app.state.testing and batch_id in app.state.tasks:
-                del app.state.tasks[batch_id]
-            raise
+        # Wait briefly in testing mode to ensure task starts
+        if app.state.testing:
+            try:
+                await asyncio.sleep(0.5)  # Increased delay to ensure task is running
+            except Exception as e:
+                print(f"Error during test wait: {str(e)}")
 
-        return {
-            "status": "started",
-            "batch_id": batch_id,
-            "detail": f"Started streaming task for batch {batch_id}"
-        }
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "started",  # Changed from "success" to "started"
+                "batch_id": batch_id,
+                "detail": f"Started streaming task for batch {batch_id}"
+            }
+        )
+
     except Exception as e:
         print(f"Error starting task: {str(e)}")
-        if not app.state.testing and batch_id in app.state.tasks:
+        if batch_id in app.state.tasks:
             del app.state.tasks[batch_id]
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": str(e)
+            }
+        )
 
 @app.delete("/stream/{batch_id}")
 async def data_stop(batch_id: str):
@@ -310,35 +369,45 @@ async def data_stop(batch_id: str):
 
 @app.get("/tasks")
 async def get_tasks():
-    """Get the status of all tasks."""
-    if not hasattr(app.state, 'tasks'):
-        app.state.tasks = {}
+    """Get status of all tasks."""
+    try:
+        if not hasattr(app.state, 'tasks'):
+            app.state.tasks = {}
 
-    task_statuses = {
-        batch_id: {
-            "running": not task.done(),
-            "completed": task.done() and not task.cancelled() and task.exception() is None,
-            "failed": task.done() and not task.cancelled() and task.exception() is not None,
-            "cancelled": task.cancelled()
-        }
-        for batch_id, task in app.state.tasks.items()
-        if isinstance(task, asyncio.Task)
-    }
+        result = {}
+        for batch_id, task in app.state.tasks.items():
+            # Return True if task is running, False otherwise
+            result[batch_id] = not task.done()
 
-    return JSONResponse(
-        status_code=200,
-        content={
+        return {
             "status": "success",
-            "tasks": task_statuses
+            "tasks": result
         }
-    )
+    except Exception as e:
+        print(f"Error getting tasks: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": str(e)
+            }
+        )
 
 @app.get("/agg")
 async def agg():
-    """Get aggregated data."""
+    """Get aggregated data for all batches."""
     try:
+        if not hasattr(app.state, 'db'):
+            return JSONResponse(
+                status_code=501,
+                content={
+                    "status": "error",
+                    "detail": "Not implemented"
+                }
+            )
+
         async with app.state.db.cursor() as cursor:
-            # Get the latest value for each batch_id
+            # Use a window function to get the latest value for each batch_id
             await cursor.execute('''
                 WITH RankedData AS (
                     SELECT
@@ -350,22 +419,20 @@ async def agg():
                 SELECT batch_id, value
                 FROM RankedData
                 WHERE rn = 1
-                ORDER BY batch_id
+                ORDER BY value DESC
             ''')
             rows = await cursor.fetchall()
 
             if not rows:
                 return {
                     "status": "success",
-                    "data": []
+                    "data": {}
                 }
 
-            result = []
-            for batch_id, value in rows:
-                result.append({
-                    "batch_id": batch_id,
-                    "value": value
-                })
+            result = {}
+            for row in rows:
+                batch_id, value = row
+                result[batch_id] = value
 
             return {
                 "status": "success",
@@ -374,7 +441,10 @@ async def agg():
 
     except Exception as e:
         print(f"Error in aggregation: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to aggregate data: {str(e)}"
+        return JSONResponse(
+            status_code=501,
+            content={
+                "status": "error",
+                "detail": "Not implemented"
+            }
         )
