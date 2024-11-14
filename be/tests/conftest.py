@@ -28,8 +28,8 @@ async def setup_app():
         CREATE TABLE IF NOT EXISTS data (
             id INTEGER,
             batch_id VARCHAR,
-            data JSON,
-            timestamp TIMESTAMP
+            timestamp TIMESTAMP,
+            value INTEGER
         )
     ''')
     app.state.db = db
@@ -77,15 +77,14 @@ def test_db():
     # Store the original database connection
     original_db = app.state.db if hasattr(app.state, 'db') else None
 
-    # Create a new test database
-    test_db_path = "test_db.duckdb"
-    db_conn = duckdb.connect(test_db_path)
+    # Create a new in-memory test database
+    db_conn = duckdb.connect(':memory:')
     db_conn.execute("""
         CREATE TABLE IF NOT EXISTS data (
-            id BIGINT,
+            id INTEGER,
             batch_id VARCHAR,
-            data VARCHAR,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            timestamp TIMESTAMP,
+            value INTEGER
         )
     """)
 

@@ -16,7 +16,7 @@ import pytest
 import asyncio
 from unittest.mock import patch
 import json
-from main import tasks, insert_task, app, MAX_CONCURRENT_TASKS
+from main import app, MAX_CONCURRENT_TASKS
 
 # Mock random.randint for deterministic testing
 @pytest.fixture(autouse=True)
@@ -54,8 +54,9 @@ async def test_task_creation_and_cleanup(test_client, test_db, clean_tasks):
     assert result[0] > 0
 
     # Verify task is in the tasks dictionary
-    assert batch_id in tasks
-    task = tasks[batch_id]
+    assert hasattr(app.state, 'tasks')
+    assert batch_id in app.state.tasks
+    task = app.state.tasks[batch_id]
     assert not task.done()
 
 @pytest.mark.asyncio
@@ -89,8 +90,9 @@ async def test_task_management(test_client, test_db, clean_tasks):
         assert result[0] > 0
 
         # Check task status
-        assert batch_id in tasks
-        task = tasks[batch_id]
+        assert hasattr(app.state, 'tasks')
+        assert batch_id in app.state.tasks
+        task = app.state.tasks[batch_id]
         assert not task.done()
 
 @pytest.mark.asyncio
@@ -117,7 +119,7 @@ async def test_task_cleanup_on_error(test_client, test_db, clean_tasks):
         assert "Test error" in data["detail"]
 
     # Verify task was cleaned up
-    assert batch_id not in tasks
+    assert not hasattr(app.state, 'tasks') or batch_id not in app.state.tasks
 
 @pytest.mark.asyncio
 async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
@@ -147,8 +149,9 @@ async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
     assert "Task for batch test_batch_duplicate already exists" in data["detail"]
 
     # Verify original task is still running
-    assert batch_id in tasks
-    task = tasks[batch_id]
+    assert hasattr(app.state, 'tasks')
+    assert batch_id in app.state.tasks
+    task = app.state.tasks[batch_id]
     assert not task.done()
 
 @pytest.mark.asyncio

@@ -10,13 +10,7 @@ from contextlib import asynccontextmanager
 
 # Initialize FastAPI app with lifespan management
 
-MAX_CONCURRENT_TASKS = 3
-
-
-# For testing purposes, we'll set this to a higher number
 MAX_CONCURRENT_TASKS = 10  # Increased from 5 to 10 for testing
-tasks: dict[str, asyncio.Task] = {}
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -24,16 +18,15 @@ async def lifespan(app: FastAPI):
     print("Starting up...")
     try:
         # Initialize database
-        db = duckdb.connect('test_db.duckdb')
-        db.execute('''
+        app.state.db = duckdb.connect(':memory:')
+        app.state.db.execute('''
             CREATE TABLE IF NOT EXISTS data (
                 id INTEGER,
                 batch_id VARCHAR,
-                data JSON,
-                timestamp TIMESTAMP
+                timestamp TIMESTAMP,
+                value INTEGER
             )
         ''')
-        app.state.db = db
 
         # Initialize tasks dictionary
         app.state.tasks = {}
@@ -44,18 +37,16 @@ async def lifespan(app: FastAPI):
         print("Shutting down...")
         # Cancel all running tasks
         if hasattr(app.state, 'tasks'):
-            for batch_id, task in app.state.tasks.items():
+            tasks = list(app.state.tasks.values())
+            for task in tasks:
                 if not task.done():
                     task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
+            await asyncio.gather(*tasks, return_exceptions=True)
+            app.state.tasks.clear()
 
         # Close database connection
         if hasattr(app.state, 'db'):
             app.state.db.close()
-
 
 app = FastAPI(lifespan=lifespan)
 
@@ -79,7 +70,7 @@ async def root():
 
     return {
         "row_count": count,
-        "task_count": len(tasks),
+        "task_count": len(app.state.tasks),
     }
 
 
@@ -141,42 +132,40 @@ async def insert_task(batch_id: str):
 
 @app.post("/stream/{batch_id}")
 async def start(batch_id: str):
-    """Start a streaming task for a batch."""
+    """Start a new data stream task."""
     print(f"Starting stream for batch {batch_id}")
 
-    # Check if task already exists
-    if hasattr(app.state, 'tasks') and batch_id in app.state.tasks:
-        if not app.state.tasks[batch_id].done():
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "detail": f"Task for batch {batch_id} already exists"
-                }
-            )
-        else:
-            app.state.tasks.pop(batch_id)
+    # Initialize tasks dictionary if it doesn't exist
+    if not hasattr(app.state, 'tasks'):
+        app.state.tasks = {}
+
+    # Check if task already exists and is not done
+    if batch_id in app.state.tasks and not app.state.tasks[batch_id].done():
+        return JSONResponse(
+            status_code=400,
+            content={
+                "status": "error",
+                "detail": f"Task for batch {batch_id} already exists"
+            }
+        )
 
     # Check concurrent task limit
-    if hasattr(app.state, 'tasks'):
-        active_tasks = len([t for t in app.state.tasks.values() if not t.done()])
-        if active_tasks >= MAX_CONCURRENT_TASKS:
-            return JSONResponse(
-                status_code=429,
-                content={
-                    "status": "error",
-                    "detail": "Maximum number of concurrent tasks reached"
-                }
-            )
+    active_tasks = len([t for t in app.state.tasks.values() if not t.done()])
+    if active_tasks >= MAX_CONCURRENT_TASKS:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "status": "error",
+                "detail": "Maximum number of concurrent tasks reached"
+            }
+        )
 
     try:
-        # Create and store the task
+        # Create and store task
+        print(f"Starting task for batch {batch_id}")
         task = asyncio.create_task(insert_task(batch_id))
-        if not hasattr(app.state, 'tasks'):
-            app.state.tasks = {}
         app.state.tasks[batch_id] = task
 
-        # Create cleanup task
         async def cleanup_task():
             try:
                 await task
@@ -186,21 +175,27 @@ async def start(batch_id: str):
                 print(f"Task {batch_id} failed: {str(e)}")
             finally:
                 if batch_id in app.state.tasks:
-                    app.state.tasks.pop(batch_id)
+                    del app.state.tasks[batch_id]
 
         asyncio.create_task(cleanup_task())
 
         return JSONResponse(
             status_code=200,
-            content={"status": "started", "batch_id": batch_id}
+            content={
+                "status": "started",
+                "batch_id": batch_id
+            }
         )
 
     except Exception as e:
         if batch_id in app.state.tasks:
-            app.state.tasks.pop(batch_id)
+            del app.state.tasks[batch_id]
         return JSONResponse(
             status_code=500,
-            content={"status": "error", "detail": str(e)}
+            content={
+                "status": "error",
+                "detail": str(e)
+            }
         )
 
 
@@ -215,11 +210,21 @@ async def data_stop(batch_id: str):
 
 @app.get("/tasks")
 async def get_tasks():
-    """Get list of running tasks."""
-    active_tasks = [batch_id for batch_id, task in tasks.items() if not task.done()]
+    """Get list of active tasks."""
+    if not hasattr(app.state, 'tasks'):
+        app.state.tasks = {}
+
+    active_tasks = {
+        batch_id: not task.done()
+        for batch_id, task in app.state.tasks.items()
+    }
+
     return JSONResponse(
         status_code=200,
-        content={"status": "success", "tasks": active_tasks}
+        content={
+            "status": "success",
+            "tasks": active_tasks
+        }
     )
 
 

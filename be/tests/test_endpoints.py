@@ -45,24 +45,23 @@ async def test_create_stream_task(test_client, test_db, clean_tasks):
 
 @pytest.mark.asyncio
 async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
-    """Test that creating a duplicate task fails properly"""
-    batch_id = "test_batch_duplicate"
-
+    """Test that creating a duplicate task returns an error."""
     # Create first task
-    response = test_client.post(f"/stream/{batch_id}")
+    response = test_client.post("/stream/test_batch_duplicate")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "started"
-    assert data["batch_id"] == batch_id
+    assert data["batch_id"] == "test_batch_duplicate"
 
-    await asyncio.sleep(0.2)  # Wait for task to start
+    # Wait for task to start
+    await asyncio.sleep(0.2)
 
-    # Attempt to create duplicate task
-    response = test_client.post(f"/stream/{batch_id}")
+    # Try to create duplicate task
+    response = test_client.post("/stream/test_batch_duplicate")
     assert response.status_code == 400
     data = response.json()
     assert data["status"] == "error"
-    assert "Task for batch test_batch_duplicate already exists" in data["detail"]
+    assert "already exists" in data["detail"]
 
 @pytest.mark.asyncio
 async def test_tasks_endpoint(test_client, clean_tasks):
