@@ -60,12 +60,15 @@ async def setup_app():
             value INTEGER
         )
     ''')
-    app.state.db = AsyncDuckDBConnection(conn)
+    db = AsyncDuckDBConnection(conn)
+    app.state.db = db
 
     yield app
 
-    # Clean up database
-    await app.state.db.close()
+    # Clean up database and tasks
+    if hasattr(app.state, 'db'):
+        await app.state.db.close()
+        delattr(app.state, 'db')
 
 @pytest.fixture
 def test_client():
@@ -113,5 +116,5 @@ async def test_db(setup_app):
     ''')
     db = AsyncDuckDBConnection(conn)
     app.state.db = db  # Set the database in app state
-    yield db
-    await db.close()
+    return db  # Return the connection directly instead of yielding
+    # Note: The connection will be closed by the setup_app fixture's cleanup
