@@ -124,43 +124,27 @@ async def insert_task(batch_id: str):
 async def start(batch_id: str, request: Request):
     """Start a new data stream for a batch."""
     try:
-        # Check if task already exists
+        # Check if task already exists BEFORE creating new task
         if batch_id in tasks:
             if not tasks[batch_id].done():
                 return JSONResponse(
                     status_code=400,
                     content={"status": "error", "detail": f"Task for batch {batch_id} already exists"}
                 )
-            else:
-                # Remove completed/failed task before creating new one
-                tasks.pop(batch_id)
+            # Remove completed/failed task
+            tasks.pop(batch_id)
 
-        # Check concurrent task limit
-        active_tasks = sum(1 for task in tasks.values() if not task.done())
+        # Check concurrent task limit BEFORE creating new task
+        active_tasks = len([t for t in tasks.values() if not t.done()])
         if active_tasks >= MAX_CONCURRENT_TASKS:
             return JSONResponse(
                 status_code=429,
                 content={"status": "error", "detail": "Maximum number of concurrent tasks reached"}
             )
 
-        # Create and store the task
+        # Create task
         task = asyncio.create_task(insert_task(batch_id))
         tasks[batch_id] = task
-
-        # Wait briefly to ensure task starts
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
-        except asyncio.TimeoutError:
-            # Task is still running, which is good
-            pass
-        except Exception as e:
-            # Task failed to start
-            if batch_id in tasks:
-                tasks.pop(batch_id)
-            return JSONResponse(
-                status_code=500,
-                content={"status": "error", "detail": str(e)}
-            )
 
         # Set up cleanup for when client disconnects
         async def cleanup_task():
@@ -176,15 +160,30 @@ async def start(batch_id: str, request: Request):
                             pass
                         except Exception:
                             pass
-                    tasks.pop(batch_id)
+                    if batch_id in tasks:  # Check again in case task was removed
+                        tasks.pop(batch_id)
             except Exception as e:
                 print(f"Error cleaning up task {batch_id}: {str(e)}")
 
-        # Store cleanup task in request state and start it
+        # Store cleanup task in request state
         request.state.cleanup_tasks = getattr(request.state, 'cleanup_tasks', [])
         cleanup_coro = cleanup_task()
         request.state.cleanup_tasks.append(cleanup_coro)
-        asyncio.create_task(cleanup_coro)
+
+        # Wait briefly to ensure task starts
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+        except asyncio.TimeoutError:
+            # Task is still running, which is good
+            pass
+        except Exception as e:
+            # Task failed to start
+            if batch_id in tasks:
+                tasks.pop(batch_id)
+            return JSONResponse(
+                status_code=500,
+                content={"status": "error", "detail": str(e)}
+            )
 
         return {"status": "started", "batch_id": batch_id}
 
