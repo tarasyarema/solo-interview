@@ -66,9 +66,9 @@ async def test_db(setup_app):
         # Create the data table with an index on batch_id
         async with db.execute('''
             CREATE TABLE IF NOT EXISTS data (
-                id INTEGER PRIMARY KEY,
+                id TEXT PRIMARY KEY,
                 batch_id TEXT,
-                timestamp DATETIME,
+                timestamp TEXT,
                 value INTEGER
             )
         '''):

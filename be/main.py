@@ -246,13 +246,14 @@ async def start(batch_id: str):
                 print(f"Protected task {batch_id} failed: {str(e)}")
                 raise
 
+        # Create and store the task BEFORE starting it
         task = asyncio.create_task(protected_task())
         app.state.tasks[batch_id] = task
 
-        # Set up done callback
+        # Set up done callback that only removes task if it's the same one
         def task_done_callback(t):
             try:
-                if batch_id in app.state.tasks:
+                if batch_id in app.state.tasks and app.state.tasks[batch_id] is t:
                     del app.state.tasks[batch_id]
                 print(f"Task {batch_id} completed and cleaned up")
             except Exception as e:
@@ -271,7 +272,7 @@ async def start(batch_id: str):
             pass
         except Exception as e:
             # Task failed to start
-            if batch_id in app.state.tasks:
+            if batch_id in app.state.tasks and app.state.tasks[batch_id] is task:
                 del app.state.tasks[batch_id]
             return JSONResponse(
                 status_code=500,
@@ -286,7 +287,7 @@ async def start(batch_id: str):
             try:
                 await task
             except Exception as e:
-                if batch_id in app.state.tasks:
+                if batch_id in app.state.tasks and app.state.tasks[batch_id] is task:
                     del app.state.tasks[batch_id]
                 return JSONResponse(
                     status_code=500,
@@ -304,7 +305,7 @@ async def start(batch_id: str):
 
     except Exception as e:
         # Clean up if task creation fails
-        if batch_id in app.state.tasks:
+        if batch_id in app.state.tasks and app.state.tasks[batch_id] is task:
             del app.state.tasks[batch_id]
         return JSONResponse(
             status_code=500,
