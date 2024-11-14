@@ -99,7 +99,7 @@ async def insert_task(batch_id: str):
         # Insert initial data
         value = random.randint(1, 100)
         app.state.db.execute(
-            'INSERT INTO data (id, batch_id, value) VALUES (?, ?, ?)',
+            'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, CURRENT_TIMESTAMP, ?)',
             (random.randint(1, 1000000), batch_id, value)
         )
 
@@ -107,16 +107,18 @@ async def insert_task(batch_id: str):
         await asyncio.sleep(2)
 
         # Insert more data
-        for _ in range(5):
+        for i in range(5):
             value = random.randint(1, 100)
             app.state.db.execute(
-                'INSERT INTO data (id, batch_id, value) VALUES (?, ?, ?)',
+                'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, CURRENT_TIMESTAMP, ?)',
                 (random.randint(1, 1000000), batch_id, value)
             )
             await asyncio.sleep(0.5)
 
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
+        if batch_id in app.state.tasks:
+            app.state.tasks[batch_id].set_exception(e)
         raise e
     finally:
         print(f"Task {batch_id} completed")
@@ -209,7 +211,13 @@ async def get_tasks():
     # Create a dictionary of task status
     task_status = {}
     for batch_id, task in app.state.tasks.items():
-        task_status[batch_id] = not task.done()
+        if task.done():
+            if task.exception() is not None:
+                task_status[batch_id] = False
+            else:
+                task_status[batch_id] = task.result() if task.done() else True
+        else:
+            task_status[batch_id] = True
 
     return {
         "status": "success",

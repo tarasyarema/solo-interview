@@ -50,7 +50,7 @@ async def test_data_aggregation(test_db, clean_tasks):
     # Insert test data with timestamps in the last minute
     for i in range(5):
         value = i * 10
-        timestamp = now - timedelta(seconds=i * 10)
+        timestamp = now - timedelta(seconds=i * 10)  # Earlier timestamps have larger values
         test_db.execute(
             'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
             (i + 1, batch_id, timestamp, value)
@@ -63,14 +63,15 @@ async def test_data_aggregation(test_db, clean_tasks):
     ).fetchone()
     assert result[0] == 5
 
-    # Verify data ordering
+    # Verify data ordering by timestamp DESC (newest first)
     results = test_db.execute(
         'SELECT value FROM data WHERE batch_id = ? ORDER BY timestamp DESC',
         [batch_id]
     ).fetchall()
     assert len(results) == 5
     for i, row in enumerate(results):
-        assert row[0] == (4 - i) * 10  # Values should be in reverse order due to DESC
+        # Since we're ordering by DESC, we expect values in reverse order
+        assert row[0] == (4 - i) * 10  # Values should be in reverse order: 40, 30, 20, 10, 0
 
 @pytest.mark.asyncio
 async def test_data_cleanup(test_db, clean_tasks):
