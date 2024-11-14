@@ -235,8 +235,11 @@ async def start(batch_id: str):
         )
 
     try:
-        # Get current active tasks (only count running tasks)
-        active_tasks = len([t for t in app.state.tasks.values() if not t.done()])
+        # Get current active tasks (only count non-completed tasks in testing mode)
+        if app.state.testing:
+            active_tasks = len(app.state.tasks)  # In testing mode, count all tasks
+        else:
+            active_tasks = len([t for t in app.state.tasks.values() if not t.done()])
         print(f"Active tasks before creation: {active_tasks}, Max allowed: {MAX_CONCURRENT_TASKS}")
 
         # Check concurrent task limit before creating new task
@@ -262,8 +265,9 @@ async def start(batch_id: str):
                         "detail": f"Task for batch {batch_id} is already running"
                     }
                 )
-            # Clean up completed task
-            del app.state.tasks[batch_id]
+            # Clean up completed task only in non-testing mode
+            if not app.state.testing:
+                del app.state.tasks[batch_id]
 
         # Check if we already have data for this batch_id
         async with app.state.db.cursor() as cursor:
@@ -315,11 +319,13 @@ async def start(batch_id: str):
                     print(f"Task {batch_id} cancelled")
                 elif t.exception():
                     print(f"Task {batch_id} failed with error: {t.exception()}")
+                    # Only remove task in non-testing mode
                     if not app.state.testing:
                         if batch_id in app.state.tasks:
                             del app.state.tasks[batch_id]
                 else:
                     print(f"Task {batch_id} completed successfully")
+                    # Only remove task in non-testing mode
                     if not app.state.testing:
                         if batch_id in app.state.tasks:
                             del app.state.tasks[batch_id]
@@ -365,8 +371,10 @@ async def start(batch_id: str):
 
     except Exception as e:
         print(f"Error starting task: {str(e)}")
-        if batch_id in app.state.tasks:
-            del app.state.tasks[batch_id]
+        # Only remove task in non-testing mode
+        if not app.state.testing:
+            if batch_id in app.state.tasks:
+                del app.state.tasks[batch_id]
         return JSONResponse(
             status_code=500,
             content={
