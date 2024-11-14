@@ -138,41 +138,48 @@ async def insert_task(batch_id: str):
                 timestamp = datetime.now() - timedelta(seconds=i)
                 values.append((id_, batch_id, timestamp, value))
 
-            # Insert all values in a single transaction
-            await cursor.execute('BEGIN')
+            # Insert all values
             for id_, batch, ts, val in values:
                 await cursor.execute(
                     'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
                     (id_, batch, ts, val)
                 )
-            await cursor.execute('COMMIT')
-            await app.state.db.commit()  # Ensure changes are committed
             print(f"Inserted {len(values)} rows for batch {batch_id}")
             return True
 
     except Exception as e:
         print(f"Error inserting data for batch {batch_id}: {str(e)}")
-        if 'cursor' in locals():
-            await cursor.execute('ROLLBACK')
         raise
 
 async def _insert_task_impl(batch_id: str):
     """Insert test data into the database."""
     print(f"Inserting data for batch {batch_id}")
-    try:
+
+    async def protected_operation():
         if batch_id == "test_batch_error":
             raise RuntimeError("Test error")
 
         # Simulate longer task duration for testing
         await asyncio.sleep(0.5)  # Add delay to ensure proper concurrent task testing
 
-        # Use asyncio shield to prevent cancellation during database operations
         async with app.state.db.cursor() as cursor:
-            success = await asyncio.shield(insert_task(batch_id))
-            if success:
-                print(f"Data insertion completed for batch {batch_id}")
-                return True
-            return False
+            await cursor.execute('BEGIN')
+            try:
+                success = await insert_task(batch_id)
+                if success:
+                    await cursor.execute('COMMIT')
+                    await app.state.db.commit()  # Ensure changes are committed
+                    print(f"Data insertion completed for batch {batch_id}")
+                    return True
+                await cursor.execute('ROLLBACK')
+                return False
+            except Exception:
+                await cursor.execute('ROLLBACK')
+                raise
+
+    try:
+        # Shield the entire operation from cancellation
+        return await asyncio.shield(protected_operation())
     except asyncio.CancelledError:
         print(f"Task {batch_id} was cancelled")
         raise
@@ -199,23 +206,26 @@ async def start(batch_id: str):
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
-    # Check if task already exists and is running
+    # Check if task already exists
     if batch_id in app.state.tasks:
         task = app.state.tasks[batch_id]
-        if isinstance(task, asyncio.Task) and not task.done():
-            print(f"Task {batch_id} already exists and is running")
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "detail": f"Task for batch {batch_id} already exists"
-                }
-            )
+        if isinstance(task, asyncio.Task):
+            if not task.done():
+                print(f"Task {batch_id} already exists and is running")
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "status": "error",
+                        "detail": f"Task for batch {batch_id} already exists"
+                    }
+                )
+            # Remove completed task
+            del app.state.tasks[batch_id]
 
-    # Get current active tasks before creating new one
+    # Get current active tasks count
     active_tasks = len([
-        task for task in app.state.tasks.values()
-        if isinstance(task, asyncio.Task) and not task.done()
+        t for t in app.state.tasks.values()
+        if isinstance(t, asyncio.Task) and not t.done()
     ])
     print(f"Active tasks before creation: {active_tasks}, Max allowed: {MAX_CONCURRENT_TASKS}")
 
@@ -244,7 +254,9 @@ async def start(batch_id: str):
                 print(f"Task {batch_id} was cancelled")
             except Exception as e:
                 print(f"Task {batch_id} failed: {str(e)}")
-            # Keep task in state for status reporting
+                # Remove failed task from state
+                if batch_id in app.state.tasks:
+                    del app.state.tasks[batch_id]
 
         task.add_done_callback(
             lambda t: asyncio.create_task(task_done_callback(t))
@@ -259,6 +271,8 @@ async def start(batch_id: str):
         except Exception as e:
             # Task failed immediately
             print(f"Task {batch_id} failed immediately: {str(e)}")
+            if batch_id in app.state.tasks:
+                del app.state.tasks[batch_id]
             return JSONResponse(
                 status_code=500,
                 content={
@@ -277,6 +291,8 @@ async def start(batch_id: str):
 
     except Exception as e:
         print(f"Error starting task {batch_id}: {str(e)}")
+        if batch_id in app.state.tasks:
+            del app.state.tasks[batch_id]
         return JSONResponse(
             status_code=500,
             content={
