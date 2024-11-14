@@ -112,7 +112,9 @@ async def test_db(setup_app):
             value INTEGER
         )
     ''')
-    async with AsyncDuckDBConnection(conn) as db:
-        app.state.db = db
-        yield db
-        # Cleanup is handled by async context manager
+    db = AsyncDuckDBConnection(conn)
+    app.state.db = db
+    yield db  # Return the connection directly
+    await db.close()
+    if hasattr(app.state, 'db'):
+        delattr(app.state, 'db')

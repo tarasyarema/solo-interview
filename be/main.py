@@ -104,6 +104,16 @@ async def _insert_task_impl(batch_id: str):
 @app.post("/stream/{batch_id}")
 async def start(batch_id: str):
     """Start a new streaming task."""
+    # Check database initialization first
+    if not hasattr(app.state, 'db'):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": "Database not initialized"
+            }
+        )
+
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
@@ -153,7 +163,6 @@ async def start(batch_id: str):
                 print(f"Task {batch_id} failed: {str(e)}")
                 if batch_id in app.state.tasks:
                     del app.state.tasks[batch_id]
-                raise  # Re-raise the exception to trigger error handling
 
         task.add_done_callback(
             lambda _: asyncio.create_task(handle_task_done(task))
@@ -164,7 +173,7 @@ async def start(batch_id: str):
             status_code=200,
             content={
                 "status": "started",
-                "batch_id": batch_id  # Changed from task_id to batch_id
+                "batch_id": batch_id
             }
         )
     except Exception as e:
