@@ -21,7 +21,10 @@ async def test_task_creation_and_cleanup(test_client, test_db, clean_tasks):
 
     # Clean up
     tasks[batch_id].cancel()
-    await asyncio.sleep(0.1)  # Allow task to clean up
+    try:
+        await asyncio.wait_for(tasks[batch_id], timeout=0.5)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
     assert tasks[batch_id].cancelled()
 
 @pytest.mark.asyncio
@@ -46,8 +49,10 @@ async def test_task_management(test_client, test_db, clean_tasks):
     # Clean up tasks
     for batch_id in batch_ids:
         tasks[batch_id].cancel()
-    await asyncio.sleep(0.1)  # Allow tasks to clean up
-    for batch_id in batch_ids:
+        try:
+            await asyncio.wait_for(tasks[batch_id], timeout=0.5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
         assert tasks[batch_id].cancelled()
 
 @pytest.mark.asyncio
@@ -66,7 +71,10 @@ async def test_insert_task_data_generation(mock_randint, test_db, clean_tasks):
 
     # Cancel the task
     task.cancel()
-    await asyncio.sleep(0.1)  # Allow task to clean up
+    try:
+        await asyncio.wait_for(task, timeout=0.5)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
 
     # Verify data was inserted with our mocked value
     result = test_db.execute(
@@ -75,7 +83,7 @@ async def test_insert_task_data_generation(mock_randint, test_db, clean_tasks):
     ).fetchone()
 
     assert result is not None
-    assert '"key": 42' in result[0]  # Match the actual data format
+    assert '"key": 42' in result[0]
 
 @pytest.mark.asyncio
 async def test_task_cleanup_on_error(test_client, test_db, clean_tasks):

@@ -38,14 +38,21 @@ async def test_stream_endpoint(test_client, test_db, clean_tasks):
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/event-stream"
 
-    # Read the response content and verify format
+    # Read the response content with timeout
     content = b""
-    for chunk in response.iter_bytes():
-        content += chunk
-        if b"data: " in content:
-            data_line = content.decode().split("\n")[0].removeprefix("data: ")
-            assert "key" in data_line  # Match the actual data format
-            break
+    async def read_stream():
+        nonlocal content
+        for chunk in response.iter_bytes():
+            content += chunk
+            if b"data: " in content:
+                return
+
+    try:
+        await asyncio.wait_for(read_stream(), timeout=2.0)
+        data_line = content.decode().split("\n")[0].removeprefix("data: ")
+        assert "key" in data_line
+    except asyncio.TimeoutError:
+        pytest.fail("Timeout waiting for stream data")
 
 @pytest.mark.asyncio
 async def test_unimplemented_tasks_endpoint(test_client):

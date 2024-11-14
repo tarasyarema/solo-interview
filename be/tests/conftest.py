@@ -13,86 +13,53 @@ def test_client():
         yield client
 
 class AsyncDuckDBConnection:
-    """Wrapper for DuckDB connection to support async context manager for transactions."""
-    def __init__(self, conn):
-        self.conn = conn
+    def __init__(self, connection):
+        self.connection = connection
 
-    def execute(self, *args, **kwargs):
-        return self.conn.execute(*args, **kwargs)
+    def execute(self, query, parameters=None):
+        return self.connection.execute(query, parameters)
 
     def close(self):
-        self.conn.close()
+        self.connection.close()
 
 @pytest.fixture
 def test_db():
     """Create a fresh test database for each test."""
-    # Store the original database connection
-    original_db = app.state.db if hasattr(app.state, 'db') else None
-
-    # Create a new test database
     test_db_path = "test_db.duckdb"
-    if os.path.exists(test_db_path):
-        os.remove(test_db_path)
-
-    # Create and set up the test database
     db_conn = duckdb.connect(test_db_path)
-    db_conn.execute('''
+    db_conn.execute("""
         CREATE TABLE IF NOT EXISTS data (
+            id INTEGER,
             batch_id VARCHAR,
-            id VARCHAR,
-            data VARCHAR
+            data VARCHAR,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    ''')
-
-    # Create async wrapper
-    test_conn = AsyncDuckDBConnection(db_conn)
-
-    # Replace the app's database connection
-    app.state.db = test_conn
-
-    yield test_conn
-
-    # Clean up
-    test_conn.close()
-    if os.path.exists(test_db_path):
-        os.remove(test_db_path)
-
-    # Restore original connection
-    if original_db is not None:
-        app.state.db = original_db
-    else:
-        delattr(app.state, 'db')
+    """)
+    yield AsyncDuckDBConnection(db_conn)
+    db_conn.close()
 
 @pytest.fixture(autouse=True)
-def clean_tasks():
+async def clean_tasks(event_loop):
     """Clean up any existing tasks before and after each test."""
-    # Create a new event loop for cleanup
-    loop = asyncio.new_event_loop()
-
-    def cleanup_tasks():
-        """Helper function to clean up tasks"""
-        for task_id, task in tasks.items():
+    async def cleanup_tasks():
+        for task_id, task in list(tasks.items()):
             if not task.done():
                 task.cancel()
                 try:
-                    loop.run_until_complete(task)
-                except (asyncio.CancelledError, Exception):
+                    await asyncio.wait_for(task, timeout=0.5)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
         tasks.clear()
 
-    # Clean up before test
-    cleanup_tasks()
-
+    await cleanup_tasks()
     yield
-
-    # Clean up after test
-    cleanup_tasks()
-    loop.close()
+    await cleanup_tasks()
 
 @pytest.fixture(scope="function")
 def event_loop():
     """Create and provide a new event loop for each test."""
     policy = asyncio.get_event_loop_policy()
     loop = policy.new_event_loop()
+    asyncio.set_event_loop(loop)
     yield loop
     loop.close()
