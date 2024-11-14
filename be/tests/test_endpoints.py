@@ -9,7 +9,7 @@ from main import app, MAX_CONCURRENT_TASKS
 async def test_root_endpoint(test_client, test_db):
     """Test the root endpoint returns correct row and task counts"""
     # Insert some test data
-    test_db.execute(
+    await test_db.execute(
         'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, CURRENT_TIMESTAMP, ?)',
         (1, "test_batch", 42)
     )
@@ -37,11 +37,11 @@ async def test_create_stream_task(test_client, test_db, clean_tasks):
     await asyncio.sleep(0.2)  # Reduced wait time
 
     # Verify data was inserted
-    result = test_db.execute(
+    result = await test_db.execute(
         'SELECT COUNT(*) FROM data WHERE batch_id = ?',
         [batch_id]
-    ).fetchone()
-    assert result[0] > 0
+    )
+    assert result.fetchone()[0] > 0
 
 @pytest.mark.asyncio
 async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
@@ -57,11 +57,11 @@ async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
     await asyncio.sleep(0.5)  # Increased wait time
 
     # Verify task is running and has data
-    result = test_db.execute(
+    result = await test_db.execute(
         'SELECT COUNT(*) FROM data WHERE batch_id = ?',
         ["test_batch_duplicate"]
-    ).fetchone()
-    assert result[0] > 0
+    )
+    assert result.fetchone()[0] > 0
 
     # Try to create duplicate task
     response = test_client.post("/stream/test_batch_duplicate")
@@ -82,11 +82,11 @@ async def test_tasks_endpoint(test_client, test_db, clean_tasks):
     await asyncio.sleep(0.5)  # Increased wait time
 
     # Verify task is running and has data
-    result = test_db.execute(
+    result = await test_db.execute(
         'SELECT COUNT(*) FROM data WHERE batch_id = ?',
         [batch_id]
-    ).fetchone()
-    assert result[0] > 0
+    )
+    assert result.fetchone()[0] > 0
 
     # Check tasks endpoint
     response = test_client.get("/tasks")
@@ -133,11 +133,11 @@ async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
 
         # Verify all tasks are running and have data
         for batch_id in tasks_created:
-            result = test_db.execute(
+            result = await test_db.execute(
                 'SELECT COUNT(*) FROM data WHERE batch_id = ?',
                 [batch_id]
-            ).fetchone()
-            assert result[0] > 0
+            )
+            assert result.fetchone()[0] > 0
 
         # Attempt to create another task should fail with 429 Too Many Requests
         response = test_client.post("/stream/batch_extra")

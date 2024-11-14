@@ -18,28 +18,26 @@ class AsyncDuckDBConnection:
         """Execute a query asynchronously."""
         if self._closed:
             raise RuntimeError("Connection is closed")
-        try:
-            if params is None:
-                return await asyncio.to_thread(lambda: self.conn.execute(query))
-            return await asyncio.to_thread(lambda: self.conn.execute(query, params))
-        except Exception as e:
-            print(f"Database error: {str(e)}")
-            raise
+
+        # Use lambda to ensure the query execution happens in the right context
+        def _execute():
+            if params is not None:
+                return self.conn.execute(query, params)
+            return self.conn.execute(query)
+
+        # Execute in thread pool and return result directly
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _execute)
+        return result
 
     async def close(self):
-        """Close the database connection."""
+        """Close the connection."""
         if not self._closed:
-            try:
-                await asyncio.to_thread(self.conn.close)
-                self._closed = True
-            except Exception as e:
-                print(f"Error closing connection: {str(e)}")
-                raise
+            self.conn.close()
+            self._closed = True
 
     async def __aenter__(self):
         """Async context manager entry."""
-        if self._closed:
-            raise RuntimeError("Connection is closed")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):

@@ -61,17 +61,32 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    count = app.state.db.execute('SELECT COUNT(*) FROM data').fetchone()
+    """Get the current row count and task count."""
+    try:
+        if not hasattr(app.state, 'db'):
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "error",
+                    "detail": "Database not initialized"
+                }
+            )
 
-    if count:
-        count = count[0]
-    else:
-        count = 0
+        result = await app.state.db.execute('SELECT COUNT(*) FROM data')
+        count = result.fetchone()[0] if result else 0
 
-    return {
-        "row_count": count,
-        "task_count": len(app.state.tasks),
-    }
+        return {
+            "row_count": count,
+            "task_count": len(app.state.tasks),
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": str(e)
+            }
+        )
 
 
 async def insert_task(batch_id: str):
@@ -136,12 +151,12 @@ async def start(batch_id: str):
         del app.state.tasks[bid]
 
     # Check concurrent task limit (after cleanup)
-    if len(app.state.tasks) >= 5:
+    if len(app.state.tasks) >= MAX_CONCURRENT_TASKS:
         return JSONResponse(
             status_code=429,
             content={
                 "status": "error",
-                "detail": "Too many concurrent tasks"
+                "detail": "Maximum number of concurrent tasks reached"
             }
         )
 
@@ -230,10 +245,10 @@ async def agg():
     """Aggregate data from the database."""
     if not hasattr(app.state, 'db'):
         return JSONResponse(
-            status_code=501,
+            status_code=500,
             content={
                 "status": "error",
-                "detail": "Not implemented"
+                "detail": "Database not initialized"
             }
         )
 
@@ -255,9 +270,9 @@ async def agg():
         )
     except Exception as e:
         return JSONResponse(
-            status_code=501,
+            status_code=500,
             content={
                 "status": "error",
-                "detail": "Not implemented"
+                "detail": str(e)
             }
         )

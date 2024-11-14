@@ -10,7 +10,7 @@ async def test_data_insertion(test_db, clean_tasks):
     current_time = datetime.now()
 
     # Insert test data
-    await test_db.execute(
+    result = await test_db.execute(
         'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
         (1, batch_id, current_time, value)
     )
