@@ -170,8 +170,11 @@ async def _insert_task_impl(batch_id: str):
     await asyncio.sleep(0.5)  # Add delay to ensure proper concurrent task testing
 
     try:
-        # Shield the entire operation from cancellation
-        return await asyncio.shield(insert_task(batch_id))
+        success = await insert_task(batch_id)
+        if success:
+            print(f"Data insertion completed for batch {batch_id}")
+            return True
+        return False
     except asyncio.CancelledError:
         print(f"Task {batch_id} was cancelled")
         raise
@@ -184,113 +187,107 @@ async def start(batch_id: str):
     """Start a new streaming task."""
     print(f"Starting stream for batch {batch_id}")
 
-    # Check database initialization
-    if not hasattr(app.state, 'db'):
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "error",
-                "detail": "Database not initialized"
-            }
-        )
-
-    # Initialize tasks dict if it doesn't exist
+    # Ensure we have our tasks dictionary
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
-    # Check if task already exists
+    # Check if task already exists and is running
     if batch_id in app.state.tasks:
-        task = app.state.tasks[batch_id]
-        if isinstance(task, asyncio.Task):
-            if not task.done():
-                print(f"Task {batch_id} already exists and is running")
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "status": "error",
-                        "detail": f"Task for batch {batch_id} already exists"
-                    }
-                )
-            # Remove completed task
-            del app.state.tasks[batch_id]
+        existing_task = app.state.tasks[batch_id]
+        if not existing_task.done():
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"Task for batch {batch_id} is already running"}
+            )
+        # Clean up completed/failed task
+        del app.state.tasks[batch_id]
 
-    # Get current active tasks count
-    active_tasks = len([
-        t for t in app.state.tasks.values()
-        if isinstance(t, asyncio.Task) and not t.done()
-    ])
-    print(f"Active tasks before creation: {active_tasks}, Max allowed: {MAX_CONCURRENT_TASKS}")
+    # Check if we already have data for this batch_id
+    async with app.state.db.cursor() as cursor:
+        await cursor.execute('SELECT COUNT(*) FROM data WHERE batch_id = ?', (batch_id,))
+        count = (await cursor.fetchone())[0]
+        if count > 0:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"Data for batch {batch_id} already exists"}
+            )
 
-    # Check concurrent task limit
-    if active_tasks >= MAX_CONCURRENT_TASKS:
-        print(f"Rejecting task {batch_id} due to concurrent task limit")
+    # Get current active tasks (only count running tasks)
+    current_tasks = len([t for t in app.state.tasks.values() if not t.done()])
+    print(f"Active tasks before creation: {current_tasks}, Max allowed: {MAX_CONCURRENT_TASKS}")
+
+    if current_tasks >= MAX_CONCURRENT_TASKS:
         return JSONResponse(
             status_code=429,
-            content={
-                "status": "error",
-                "detail": f"Maximum number of concurrent tasks ({MAX_CONCURRENT_TASKS}) reached"
-            }
+            content={"error": f"Maximum concurrent tasks ({MAX_CONCURRENT_TASKS}) reached"}
         )
 
+    # Create and start the task with proper shielding
     try:
-        # Create and start the task
-        task = asyncio.create_task(_insert_task_impl(batch_id))
+        # Create a shielded task that will run to completion
+        async def protected_task():
+            try:
+                return await _insert_task_impl(batch_id)
+            except asyncio.CancelledError:
+                print(f"Protected task {batch_id} received cancellation")
+                raise
+            except Exception as e:
+                print(f"Protected task {batch_id} failed: {str(e)}")
+                raise
+
+        task = asyncio.create_task(asyncio.shield(protected_task()))
         app.state.tasks[batch_id] = task
 
-        # Add done callback that preserves task state
-        async def task_done_callback(t):
+        # Set up done callback
+        def task_done_callback(t):
             try:
-                await t
-                print(f"Task {batch_id} completed successfully")
-            except asyncio.CancelledError:
-                print(f"Task {batch_id} was cancelled")
-            except Exception as e:
-                print(f"Task {batch_id} failed: {str(e)}")
-                # Remove failed task from state
                 if batch_id in app.state.tasks:
                     del app.state.tasks[batch_id]
+                print(f"Task {batch_id} completed and cleaned up")
+            except Exception as e:
+                print(f"Error in task done callback: {str(e)}")
 
-        task.add_done_callback(
-            lambda t: asyncio.create_task(task_done_callback(t))
-        )
+        task.add_done_callback(task_done_callback)
 
-        # Wait a short time to catch immediate failures
+        # Wait briefly to ensure task starts
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+            await asyncio.wait_for(
+                asyncio.shield(asyncio.wait([task], return_when=asyncio.FIRST_COMPLETED)),
+                timeout=0.1
+            )
         except asyncio.TimeoutError:
             # Task is still running, which is expected
             pass
         except Exception as e:
-            # Task failed immediately
-            print(f"Task {batch_id} failed immediately: {str(e)}")
+            # Task failed to start
             if batch_id in app.state.tasks:
                 del app.state.tasks[batch_id]
             return JSONResponse(
                 status_code=500,
-                content={
-                    "status": "error",
-                    "detail": str(e)
-                }
+                content={"error": f"Failed to start task: {str(e)}"}
             )
 
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "started",
-                "batch_id": batch_id
-            }
-        )
+        # Check if task failed immediately
+        if task.done():
+            try:
+                await task
+            except Exception as e:
+                if batch_id in app.state.tasks:
+                    del app.state.tasks[batch_id]
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": f"Task failed: {str(e)}"}
+                )
+
+        return {"message": f"Started streaming task for batch {batch_id}"}
 
     except Exception as e:
-        print(f"Error starting task {batch_id}: {str(e)}")
+        # Clean up if task creation fails
         if batch_id in app.state.tasks:
             del app.state.tasks[batch_id]
         return JSONResponse(
             status_code=500,
-            content={
-                "status": "error",
-                "detail": str(e)
-            }
+            content={"error": f"Failed to create task: {str(e)}"}
         )
 
 @app.delete("/stream/{batch_id}")
