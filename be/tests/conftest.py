@@ -4,12 +4,36 @@ from fastapi.testclient import TestClient
 import duckdb
 from pathlib import Path
 import os
+from contextlib import asynccontextmanager
 from main import app, tasks
 
 @pytest.fixture(scope="function")
-def test_client():
-    with TestClient(app) as client:
+async def test_client():
+    """Create a test client with its own event loop."""
+    async with TestClient(app) as client:
         yield client
+
+class AsyncDuckDBConnection:
+    """Wrapper for DuckDB connection to support async context manager for transactions."""
+    def __init__(self, conn):
+        self.conn = conn
+
+    def execute(self, *args, **kwargs):
+        return self.conn.execute(*args, **kwargs)
+
+    @asynccontextmanager
+    async def transaction(self):
+        """Async context manager for transactions."""
+        self.conn.execute('BEGIN TRANSACTION')
+        try:
+            yield
+            self.conn.execute('COMMIT')
+        except Exception:
+            self.conn.execute('ROLLBACK')
+            raise
+
+    def close(self):
+        self.conn.close()
 
 @pytest.fixture(scope="function")
 async def test_db():
@@ -23,8 +47,8 @@ async def test_db():
         os.remove(test_db_path)
 
     # Create and set up the test database
-    test_conn = duckdb.connect(test_db_path)
-    test_conn.execute('''
+    db_conn = duckdb.connect(test_db_path)
+    db_conn.execute('''
         CREATE TABLE IF NOT EXISTS data (
             batch_id VARCHAR,
             id VARCHAR,
@@ -32,21 +56,24 @@ async def test_db():
         )
     ''')
 
+    # Create async wrapper
+    test_conn = AsyncDuckDBConnection(db_conn)
+
     # Replace the app's database connection
     app.state.db = test_conn
 
-    try:
-        yield test_conn
-    finally:
-        # Clean up
-        test_conn.close()
-        if os.path.exists(test_db_path):
-            os.remove(test_db_path)
-        # Restore original connection
-        if original_db is not None:
-            app.state.db = original_db
-        else:
-            delattr(app.state, 'db')
+    yield test_conn
+
+    # Clean up
+    test_conn.close()
+    if os.path.exists(test_db_path):
+        os.remove(test_db_path)
+
+    # Restore original connection
+    if original_db is not None:
+        app.state.db = original_db
+    else:
+        delattr(app.state, 'db')
 
 @pytest.fixture(autouse=True)
 async def clean_tasks():
@@ -72,3 +99,13 @@ async def clean_tasks():
             except (asyncio.CancelledError, Exception):
                 pass
     tasks.clear()
+
+@pytest.fixture(scope="session")
+def event_loop():
+    """Create and provide a new event loop for each test session."""
+    policy = asyncio.get_event_loop_policy()
+    loop = policy.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield loop
+    if not loop.is_closed():
+        loop.close()
