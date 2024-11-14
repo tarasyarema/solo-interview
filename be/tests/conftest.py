@@ -11,35 +11,33 @@ class AsyncDuckDBConnection:
     """Async wrapper for DuckDB connection."""
     def __init__(self, conn):
         self.conn = conn
-        self._closed = False
 
     async def execute(self, query, params=None):
         """Execute a query asynchronously."""
-        if self._closed:
-            raise RuntimeError("Connection is closed")
-
-        loop = asyncio.get_event_loop()
         try:
-            if params:
-                result = await loop.run_in_executor(
-                    None, self.conn.execute, query, params
-                )
-            else:
-                result = await loop.run_in_executor(
-                    None, self.conn.execute, query
-                )
-            return result
+            if params is None:
+                return self.conn.execute(query)
+            return self.conn.execute(query, params)
         except Exception as e:
             print(f"Database error: {str(e)}")
             raise
 
     async def close(self):
-        """Close the connection."""
-        if not self._closed:
-            try:
+        """Close the database connection."""
+        try:
+            if not self.conn.is_closed():
                 self.conn.close()
-            finally:
-                self._closed = True
+        except Exception as e:
+            print(f"Error closing connection: {str(e)}")
+            raise
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()
 
 @pytest.fixture(scope="function")
 async def setup_app():
@@ -114,11 +112,7 @@ async def test_db(setup_app):
             value INTEGER
         )
     ''')
-    db = AsyncDuckDBConnection(conn)
-    app.state.db = db  # Set the database in app state
-    try:
+    async with AsyncDuckDBConnection(conn) as db:
+        app.state.db = db
         yield db
-    finally:
-        await db.close()
-        if hasattr(app.state, 'db'):
-            delattr(app.state, 'db')
+        # Cleanup is handled by async context manager

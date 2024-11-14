@@ -77,33 +77,28 @@ async def root():
 async def insert_task(batch_id: str):
     """Insert task data into the database."""
     print(f"Inserting data for batch {batch_id}")
-    try:
-        if not hasattr(app.state, 'db'):
-            raise RuntimeError("Database not initialized")
+    if not hasattr(app.state, 'db'):
+        raise RuntimeError("Database not initialized")
 
-        # Use fixed values for testing
-        values = [(i, batch_id, datetime.now(), 42) for i in range(1, 6)]
+    # Use fixed values for testing
+    values = [(i, batch_id, datetime.now(), 42) for i in range(1, 6)]
 
-        for value in values:
-            await app.state.db.execute(
-                'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
-                value
-            )
-        return True
-    except Exception as e:
-        print(f"Error inserting data for batch {batch_id}: {str(e)}")
-        raise
+    for value in values:
+        await app.state.db.execute(
+            'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
+            value
+        )
+    return True
 
 async def _insert_task_impl(batch_id: str):
     """Protected implementation of insert_task."""
     try:
-        # Shield the task from cancellation during database operations
-        return await asyncio.shield(insert_task(batch_id))
+        return await insert_task(batch_id)
     except Exception as e:
         print(f"Error in insert_task for {batch_id}: {str(e)}")
         if batch_id in app.state.tasks:
             del app.state.tasks[batch_id]
-        raise
+        raise RuntimeError(str(e))  # Re-raise with explicit error message
 
 
 @app.post("/stream/{batch_id}")
@@ -156,9 +151,9 @@ async def start(batch_id: str):
                 print(f"Task {batch_id} was cancelled")
             except Exception as e:
                 print(f"Task {batch_id} failed: {str(e)}")
-            finally:
                 if batch_id in app.state.tasks:
                     del app.state.tasks[batch_id]
+                raise  # Re-raise the exception to trigger error handling
 
         task.add_done_callback(
             lambda _: asyncio.create_task(handle_task_done(task))
@@ -169,7 +164,7 @@ async def start(batch_id: str):
             status_code=200,
             content={
                 "status": "started",
-                "task_id": batch_id
+                "batch_id": batch_id  # Changed from task_id to batch_id
             }
         )
     except Exception as e:
