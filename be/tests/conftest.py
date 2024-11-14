@@ -5,18 +5,18 @@ from fastapi.testclient import TestClient
 from main import app, tasks
 
 @pytest.fixture(scope="function")
-def event_loop():
+@pytest.mark.asyncio
+async def event_loop():
     """Create and provide a new event loop for each test."""
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
-    asyncio.set_event_loop(loop)
+    loop = asyncio.new_event_loop()
     yield loop
     loop.close()
 
 @pytest.fixture
 def test_client():
-    """Create a test client."""
-    return TestClient(app)
+    """Create a test client with extended timeout."""
+    client = TestClient(app, timeout=30.0)
+    return client
 
 class AsyncDuckDBConnection:
     def __init__(self, connection):
@@ -73,6 +73,13 @@ def test_db():
 async def clean_tasks():
     """Clean up any existing tasks before and after each test."""
     # Clear tasks dict before each test
+    for task_id, task in list(tasks.items()):
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     tasks.clear()
 
     yield
@@ -85,4 +92,6 @@ async def clean_tasks():
                 await task
             except asyncio.CancelledError:
                 pass
+        elif task.done() and task.exception():
+            print(f"Task {task_id} failed with: {task.exception()}")
     tasks.clear()

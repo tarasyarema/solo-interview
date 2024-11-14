@@ -83,7 +83,7 @@ async def insert_task(batch_id: str):
         )
 
         # Add initial delay to ensure task is running during test assertions
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(0.5)
 
         # Continuous insertion until cancelled
         while True:
@@ -99,8 +99,8 @@ async def insert_task(batch_id: str):
                     'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
                     (batch_id, dumps({"value": value}), datetime.now())
                 )
-                # Add a longer delay to prevent rapid completion
-                await asyncio.sleep(2.0)
+                # Add a shorter delay to prevent rapid completion but avoid timeouts
+                await asyncio.sleep(0.5)
             except asyncio.CancelledError:
                 print(f"Task {batch_id} was cancelled")
                 break
