@@ -118,13 +118,13 @@ async def insert_task(batch_id: str):
     values = [(i, batch_id, datetime.now(), i * 10) for i in range(1, 5)]
 
     try:
-        async with app.state.db.execute('BEGIN TRANSACTION'):
+        # Let aiosqlite handle the transaction
+        async with app.state.db.cursor() as cursor:
             for value in values:
-                async with app.state.db.execute(
+                await cursor.execute(
                     'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
                     value
-                ):
-                    pass  # No need to fetch results for INSERT operations
+                )
             await app.state.db.commit()
 
         # Add a delay to prevent tasks from completing too quickly
@@ -214,22 +214,19 @@ async def start(batch_id: str):
         )
         app.state.tasks[batch_id] = task
 
-        async def handle_task_done(task):
+        # Use a simpler task done callback that doesn't create new tasks
+        def task_done_callback(t):
             try:
-                await task
+                t.result()  # This will raise any exception that occurred
             except asyncio.CancelledError:
                 print(f"Task {batch_id} was cancelled")
-                if batch_id in app.state.tasks:
-                    del app.state.tasks[batch_id]
             except Exception as e:
                 print(f"Task {batch_id} failed: {str(e)}")
+            finally:
                 if batch_id in app.state.tasks:
                     del app.state.tasks[batch_id]
-                raise
 
-        task.add_done_callback(
-            lambda _: asyncio.create_task(handle_task_done(task))
-        )
+        task.add_done_callback(task_done_callback)
 
         return JSONResponse(
             status_code=200,
