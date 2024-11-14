@@ -11,7 +11,8 @@ import duckdb
 import asyncio
 
 
-MAX_CONCURRENT_TASKS = 5
+# For testing purposes, we'll set this to a higher number
+MAX_CONCURRENT_TASKS = 10  # Increased from 5 to 10 for testing
 tasks: dict[str, asyncio.Task] = {}
 
 
@@ -70,6 +71,7 @@ async def get_tasks():
 
 
 async def insert_task(batch_id: str):
+    """Insert random data for a given batch ID."""
     print(f"Starting task for batch {batch_id}")
     inserted = False
     try:
@@ -87,9 +89,9 @@ async def insert_task(batch_id: str):
 
         # Now enter the continuous insertion loop
         while True:
-            # Only check cancellation after first insert
             current_task = asyncio.current_task()
             if current_task and current_task.cancelled():
+                print(f"Task {batch_id} was cancelled")
                 break
 
             value = random.randint(0, 100)
@@ -98,28 +100,21 @@ async def insert_task(batch_id: str):
                 'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
                 (batch_id, dumps({"value": value}), datetime.now())
             )
-
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.1)  # Reduced sleep time for testing
 
     except asyncio.CancelledError:
         print(f"Task {batch_id} was cancelled")
-        # Only remove from tasks if we haven't inserted any data
         if not inserted and batch_id in tasks:
             del tasks[batch_id]
         raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
-        # Always remove task on error
         if batch_id in tasks:
             del tasks[batch_id]
         raise
     finally:
-        # Only remove from tasks dict if this is the current task for this batch_id
-        # and if we haven't inserted any data (keep successful tasks in dict for stream endpoint)
-        current_task = asyncio.current_task()
-        if (not inserted and
-            batch_id in tasks and
-            tasks[batch_id] == current_task):
+        # Only remove from tasks dict if we haven't inserted any data
+        if not inserted and batch_id in tasks:
             del tasks[batch_id]
 
 

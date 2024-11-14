@@ -114,19 +114,17 @@ async def test_insert_task_data_generation(test_db, clean_tasks):
 
 @pytest.mark.asyncio
 async def test_task_cleanup_on_error(test_client, test_db, clean_tasks):
-    """Test that tasks are properly cleaned up when errors occur"""
+    """Test that tasks are properly cleaned up when an error occurs"""
     batch_id = "test_batch_error"
 
-    # Create a task that will fail
-    with patch('main.insert_task', side_effect=Exception("Test error")):
+    # Create an async mock for insert_task
+    async def mock_error(*args, **kwargs):
+        raise Exception("Test error")
+
+    with patch('main.insert_task', new=mock_error):
         response = test_client.post(f"/stream/{batch_id}")
         assert response.status_code == 500
         assert "Test error" in response.json()["detail"]
-
-        # Allow task to fail
-        await asyncio.sleep(0.5)
-
-        # Verify task is removed
         assert batch_id not in tasks
 
 @pytest.mark.asyncio

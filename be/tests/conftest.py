@@ -70,18 +70,19 @@ def test_db():
         delattr(app.state, 'db')
 
 @pytest.fixture(autouse=True)
-async def clean_tasks(event_loop):
+async def clean_tasks():
     """Clean up any existing tasks before and after each test."""
-    async def cleanup_tasks():
-        for task_id, task in list(tasks.items()):
-            if not task.done():
-                task.cancel()
-                try:
-                    await asyncio.wait_for(task, timeout=0.5)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
-        tasks.clear()
+    # Clear tasks dict before each test
+    tasks.clear()
 
-    await cleanup_tasks()
     yield
-    await cleanup_tasks()
+
+    # Clean up tasks after test
+    for task_id, task in list(tasks.items()):
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    tasks.clear()
