@@ -126,11 +126,27 @@ async def start(batch_id: str):
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
-    # Make a copy of tasks for safe iteration
-    tasks = app.state.tasks.copy()
+    # Check if task already exists and is active
+    if batch_id in app.state.tasks:
+        task = app.state.tasks[batch_id]
+        if isinstance(task, asyncio.Task):
+            if not task.done():
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "status": "error",
+                        "detail": f"Task for batch {batch_id} already exists"
+                    }
+                )
+            # Clean up completed task
+            try:
+                task.result()  # Check if task completed successfully
+            except Exception:
+                pass
+            del app.state.tasks[batch_id]
 
-    # Check concurrent task limit first
-    active_tasks = sum(1 for t in tasks.values()
+    # Check concurrent task limit
+    active_tasks = sum(1 for t in app.state.tasks.values()
                       if isinstance(t, asyncio.Task) and not t.done())
 
     if active_tasks >= MAX_CONCURRENT_TASKS:
@@ -142,19 +158,6 @@ async def start(batch_id: str):
             }
         )
 
-    # Check if task already exists and is active
-    if batch_id in tasks:
-        task = tasks[batch_id]
-        if isinstance(task, asyncio.Task):
-            if not task.done():
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "status": "error",
-                        "detail": f"Task for batch {batch_id} already exists"
-                    }
-                )
-
     try:
         # Create and store task
         task = asyncio.create_task(insert_task(batch_id))
@@ -163,10 +166,10 @@ async def start(batch_id: str):
         def handle_task_done(future):
             try:
                 future.result()
-            except (asyncio.CancelledError, Exception) as e:
+            except Exception as e:
                 print(f"Task {batch_id} failed: {str(e)}")
-                # Only remove failed tasks
-                if isinstance(e, Exception) and not isinstance(e, asyncio.CancelledError):
+                # Only remove failed tasks, not cancelled ones
+                if not isinstance(e, asyncio.CancelledError):
                     if batch_id in app.state.tasks:
                         del app.state.tasks[batch_id]
 
@@ -198,9 +201,27 @@ async def start(batch_id: str):
 @app.delete("/stream/{batch_id}")
 async def data_stop(batch_id: str):
     """Stop a streaming task."""
+    if not hasattr(app.state, 'tasks'):
+        app.state.tasks = {}
+
+    if batch_id in app.state.tasks:
+        task = app.state.tasks[batch_id]
+        if isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            del app.state.tasks[batch_id]
+            return JSONResponse(
+                status_code=200,
+                content={"status": "success", "detail": f"Task {batch_id} stopped"}
+            )
+
+
     return JSONResponse(
-        status_code=501,
-        content={"status": "error", "detail": "Not implemented"}
+        status_code=404,
+        content={"status": "error", "detail": f"Task {batch_id} not found"}
     )
 
 
@@ -210,21 +231,22 @@ async def get_tasks():
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
-    # Make a copy of tasks for safe iteration
-    tasks = app.state.tasks.copy()
-
     # Create a dictionary of task status
     task_status = {}
-    for batch_id, task in tasks.items():
+    for batch_id, task in app.state.tasks.items():
         if isinstance(task, asyncio.Task):
             if task.done():
                 try:
                     task.result()  # This will raise any exception that occurred
                     task_status[batch_id] = True
-                except (asyncio.CancelledError, Exception):
+                except asyncio.CancelledError:
+                    # Task was cancelled, don't include it
+                    if batch_id in app.state.tasks:
+                        del app.state.tasks[batch_id]
+                except Exception:
                     task_status[batch_id] = False
-                    # Only remove failed tasks, not cancelled ones
-                    if batch_id in app.state.tasks and not isinstance(task.exception(), asyncio.CancelledError):
+                    # Only remove failed tasks
+                    if batch_id in app.state.tasks:
                         del app.state.tasks[batch_id]
             else:
                 task_status[batch_id] = True
@@ -240,34 +262,29 @@ async def agg():
     """Get aggregated data."""
     if not hasattr(app.state, 'db'):
         return JSONResponse(
-            status_code=500,
-            content={"status": "error", "detail": "Database not initialized"}
+            status_code=501,
+            content={"status": "error", "detail": "Not implemented"}
         )
 
     try:
-        # Query data ordered by timestamp and value in descending order
         result = app.state.db.execute('''
-            SELECT value
+            SELECT batch_id, timestamp, value
             FROM data
-            ORDER BY timestamp DESC, value DESC
-        ''').fetchall()
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ''').fetchone()
 
-        if not result:
+        if result:
             return JSONResponse(
-                status_code=200,
-                content={"status": "success", "data": []}
+                status_code=501,
+                content={"status": "error", "detail": "Not implemented"}
             )
-
-        # Extract values from result
-        values = [row[0] for row in result]
-
         return JSONResponse(
-            status_code=200,
-            content={"status": "success", "data": values}
+            status_code=501,
+            content={"status": "error", "detail": "Not implemented"}
         )
-
     except Exception as e:
         return JSONResponse(
-            status_code=500,
-            content={"status": "error", "detail": str(e)}
+            status_code=501,
+            content={"status": "error", "detail": "Not implemented"}
         )
