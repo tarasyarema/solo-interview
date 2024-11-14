@@ -3,15 +3,15 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import asyncio
 import json
-from main import app, tasks, MAX_CONCURRENT_TASKS
+from main import app, MAX_CONCURRENT_TASKS
 
 @pytest.mark.asyncio
 async def test_root_endpoint(test_client, test_db):
     """Test the root endpoint returns correct row and task counts"""
     # Insert some test data
     test_db.execute(
-        'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)',
-        ("test_batch", json.dumps({"value": 42}))
+        'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, CURRENT_TIMESTAMP, ?)',
+        (1, "test_batch", 42)
     )
 
     response = test_client.get("/")
@@ -79,8 +79,9 @@ async def test_tasks_endpoint(test_client, clean_tasks):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
-    assert isinstance(data["tasks"], list)
+    assert isinstance(data["tasks"], dict)
     assert batch_id in data["tasks"]
+    assert data["tasks"][batch_id] is True  # Task should be active
 
 @pytest.mark.asyncio
 async def test_unimplemented_stop_endpoint(test_client):
@@ -132,8 +133,8 @@ async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
         # Clean up all tasks
         for i in range(MAX_CONCURRENT_TASKS):
             batch_id = f"batch_{i}"
-            if batch_id in tasks:
-                task = tasks[batch_id]
+            if hasattr(app.state, 'tasks') and batch_id in app.state.tasks:
+                task = app.state.tasks[batch_id]
                 if not task.done():
                     task.cancel()
                     try:
