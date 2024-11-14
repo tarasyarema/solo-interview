@@ -69,23 +69,28 @@ async def get_tasks():
 
 
 async def insert_task(batch_id: str):
-    id = datetime.now().isoformat()
-    i = 0
-
     try:
         while True:
             await asyncio.sleep(0.25)
-
-            print(f"{batch_id}: {id} - it: {i}")
             value = random.randint(0, 100)
 
+            # Ensure we have access to the database connection
+            if not hasattr(app.state, 'db'):
+                raise RuntimeError("Database connection not available")
+
+            print(f"Inserting data for batch {batch_id}")
             app.state.db.execute(
                 'INSERT INTO data VALUES (?, ?, ?)',
-                (batch_id, id, dumps({"key": value}))
+                (batch_id, datetime.now().isoformat(), dumps({"key": value}))
             )
-            i += 1
+    except asyncio.CancelledError:
+        print(f"Task {batch_id} was cancelled")
+        raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
+        # Remove the task from the tasks dict if it fails
+        if batch_id in tasks:
+            del tasks[batch_id]
         raise
 
 
@@ -100,7 +105,8 @@ async def start(batch_id: str):
         raise HTTPException(status_code=400, detail="Maximum number of concurrent tasks reached")
 
     # Create new task
-    tasks[batch_id] = asyncio.create_task(insert_task(batch_id))
+    task = asyncio.create_task(insert_task(batch_id))
+    tasks[batch_id] = task
 
     return {
         "message": "Batch started",

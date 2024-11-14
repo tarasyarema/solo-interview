@@ -8,13 +8,14 @@ from main import app, tasks
 
 @pytest.fixture(scope="function")
 def test_client():
-    return TestClient(app)
+    with TestClient(app) as client:
+        yield client
 
 @pytest.fixture(scope="function")
 async def test_db():
     """Create a fresh test database for each test."""
     # Store the original database connection
-    original_db = app.state.db
+    original_db = app.state.db if hasattr(app.state, 'db') else None
 
     # Create a new test database
     test_db_path = "test_db.duckdb"
@@ -42,7 +43,10 @@ async def test_db():
         if os.path.exists(test_db_path):
             os.remove(test_db_path)
         # Restore original connection
-        app.state.db = original_db
+        if original_db is not None:
+            app.state.db = original_db
+        else:
+            delattr(app.state, 'db')
 
 @pytest.fixture(autouse=True)
 async def clean_tasks():
