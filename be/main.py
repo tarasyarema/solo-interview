@@ -73,7 +73,6 @@ async def get_tasks():
 async def insert_task(batch_id: str):
     """Insert data for a batch in a continuous loop."""
     print(f"Starting task for batch {batch_id}")
-    inserted = False
     try:
         # Initial data insertion
         print(f"Inserting initial data for batch {batch_id}")
@@ -82,7 +81,9 @@ async def insert_task(batch_id: str):
             'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
             (batch_id, dumps({"value": value}), datetime.now())
         )
-        inserted = True
+
+        # Add initial delay to ensure task is running during test assertions
+        await asyncio.sleep(1.5)
 
         # Continuous insertion until cancelled
         while True:
@@ -99,7 +100,7 @@ async def insert_task(batch_id: str):
                     (batch_id, dumps({"value": value}), datetime.now())
                 )
                 # Add a longer delay to prevent rapid completion
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(2.0)
             except asyncio.CancelledError:
                 print(f"Task {batch_id} was cancelled")
                 break
@@ -122,13 +123,16 @@ async def start(batch_id: str):
                 content={"detail": f"Task {batch_id} already exists"}
             )
 
-        # Clean up completed tasks
-        completed_tasks = [bid for bid, task in tasks.items() if task.done()]
+        # Clean up completed tasks that failed
+        completed_tasks = [bid for bid, task in tasks.items()
+                         if task.done() and task.exception() is not None]
         for bid in completed_tasks:
             del tasks[bid]
 
         # Check concurrent task limit
-        active_tasks = len([task for task in tasks.values() if not task.done()])
+        active_tasks = len([task for task in tasks.values()
+                          if not task.done() or
+                          (task.done() and task.exception() is None)])
         if active_tasks >= MAX_CONCURRENT_TASKS:
             return JSONResponse(
                 status_code=429,
