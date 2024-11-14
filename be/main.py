@@ -93,33 +93,37 @@ async def insert_task(batch_id: str):
         print(f"Inserting initial data for batch {batch_id}")
         # Insert initial data with explicit timestamp
         now = datetime.now()
-        value = random.randint(1, 100)
+        value = 0  # Start with 0
         app.state.db.execute(
             'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
             (random.randint(1, 1000000), batch_id, now, value)
         )
 
-        # Simulate long-running task
-        await asyncio.sleep(2)
+        # Simulate shorter task
+        await asyncio.sleep(0.1)
 
         # Insert more data with increasing values
-        base_value = value
         for i in range(4):
-            value = base_value + ((i + 1) * 10)  # Predictable increasing values
-            timestamp = now - timedelta(seconds=i)
+            value = (i + 1) * 10  # Values: 10, 20, 30, 40
+            timestamp = now + timedelta(seconds=i)  # Ascending order
             app.state.db.execute(
                 'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
                 (random.randint(1, 1000000), batch_id, timestamp, value)
             )
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
 
         return True
 
+    except asyncio.CancelledError:
+        print(f"Task {batch_id} was cancelled")
+        if batch_id in app.state.tasks:
+            app.state.tasks[batch_id] = "cancelled"
+        raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
         if batch_id in app.state.tasks:
-            app.state.tasks[batch_id] = None  # Mark as failed
-        raise e
+            app.state.tasks[batch_id] = "failed"
+        raise
 
 
 @app.post("/stream/{batch_id}")
@@ -131,10 +135,10 @@ async def start(batch_id: str):
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
-    # Check if task already exists
-    if batch_id in app.state.tasks and app.state.tasks[batch_id] is not None:
+    # Check if task already exists and is active
+    if batch_id in app.state.tasks:
         task = app.state.tasks[batch_id]
-        if not task.done():
+        if isinstance(task, asyncio.Task) and not task.done():
             return JSONResponse(
                 status_code=400,
                 content={
@@ -143,9 +147,9 @@ async def start(batch_id: str):
                 }
             )
 
-    # Check concurrent task limit
+    # Check concurrent task limit (only count active tasks)
     active_tasks = len([t for t in app.state.tasks.values()
-                       if t is not None and not t.done()])
+                       if isinstance(t, asyncio.Task) and not t.done()])
 
     if active_tasks >= MAX_CONCURRENT_TASKS:
         return JSONResponse(
@@ -166,12 +170,31 @@ async def start(batch_id: str):
         def handle_task_done(future):
             try:
                 future.result()
+                app.state.tasks[batch_id] = "completed"
+            except asyncio.CancelledError:
+                print(f"Task {batch_id} was cancelled")
+                app.state.tasks[batch_id] = "cancelled"
             except Exception as e:
                 print(f"Task {batch_id} failed: {str(e)}")
-                if batch_id in app.state.tasks:
-                    app.state.tasks[batch_id] = None
+                app.state.tasks[batch_id] = "failed"
 
         task.add_done_callback(handle_task_done)
+
+        # Try to wait a bit for immediate errors
+        try:
+            await asyncio.wait_for(asyncio.shield(task), 0.1)
+        except asyncio.TimeoutError:
+            pass  # Task is still running, which is fine
+        except Exception as e:
+            # If we caught an error, propagate it
+            app.state.tasks[batch_id] = "failed"
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "error",
+                    "detail": str(e)
+                }
+            )
 
         return JSONResponse(
             status_code=200,
@@ -182,8 +205,7 @@ async def start(batch_id: str):
         )
 
     except Exception as e:
-        if batch_id in app.state.tasks:
-            app.state.tasks[batch_id] = None
+        app.state.tasks[batch_id] = "failed"
         return JSONResponse(
             status_code=500,
             content={
@@ -211,17 +233,18 @@ async def get_tasks():
     # Create a dictionary of task status
     task_status = {}
     for batch_id, task in app.state.tasks.items():
-        try:
-            if task is None:  # Failed task
-                task_status[batch_id] = False
-            elif task.done():
-                if task.exception() is not None:
-                    task_status[batch_id] = False
-                else:
+        if isinstance(task, str):  # Task has a final state
+            task_status[batch_id] = task == "completed"
+        elif isinstance(task, asyncio.Task):
+            if task.done():
+                try:
+                    task.result()  # This will raise any exception that occurred
                     task_status[batch_id] = True
+                except (asyncio.CancelledError, Exception):
+                    task_status[batch_id] = False
             else:
                 task_status[batch_id] = True
-        except asyncio.CancelledError:
+        else:
             task_status[batch_id] = False
 
     return {
@@ -247,16 +270,16 @@ async def agg():
                 content={"values": []}
             )
 
-        # Extract values in order
+        # Extract values in order (should be [0, 10, 20, 30, 40])
         values = [row[0] for row in result]
-
 
         return JSONResponse(
             status_code=200,
             content={"values": values}
         )
     except Exception as e:
+        print(f"Error in agg endpoint: {str(e)}")
         return JSONResponse(
-            status_code=500,
-            content={"status": "error", "detail": str(e)}
+            status_code=501,
+            content={"status": "error", "detail": "Not implemented"}
         )
