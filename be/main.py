@@ -72,6 +72,7 @@ async def get_tasks():
 async def insert_task(batch_id: str):
     print(f"Starting task for batch {batch_id}")
     try:
+        inserted = False
         while True:
             # Check if task is cancelled before sleeping
             current_task = asyncio.current_task()
@@ -90,21 +91,31 @@ async def insert_task(batch_id: str):
                 'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
                 (batch_id, dumps({"value": value}), datetime.now())
             )
+            inserted = True
 
             # Only sleep after first insert
             await asyncio.sleep(0.25)
 
     except asyncio.CancelledError:
         print(f"Task {batch_id} was cancelled")
+        # Only remove from tasks if we haven't inserted any data
+        if not inserted and batch_id in tasks:
+            del tasks[batch_id]
         raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
+        # Always remove task on error
         if batch_id in tasks:
             del tasks[batch_id]
         raise
     finally:
         # Only remove from tasks dict if this is the current task for this batch_id
-        if batch_id in tasks and tasks[batch_id] == asyncio.current_task():
+        # and if we haven't inserted any data (keep successful tasks in dict for stream endpoint)
+        current_task = asyncio.current_task()
+        if (not inserted and
+            batch_id in tasks and
+            tasks[batch_id] == current_task and
+            (current_task.done() or current_task.cancelled())):
             del tasks[batch_id]
 
 
@@ -112,10 +123,14 @@ async def insert_task(batch_id: str):
 async def start(batch_id: str):
     # Check for duplicate task first
     if batch_id in tasks:
-        raise HTTPException(status_code=400, detail="Task already exists")
+        if not tasks[batch_id].done():
+            raise HTTPException(status_code=400, detail="Task already exists")
+        # If task is done, remove it and allow new task
+        del tasks[batch_id]
 
     # Then check concurrent task limit
-    if len(tasks) >= MAX_CONCURRENT_TASKS:
+    active_tasks = len([t for t in tasks.values() if not t.done()])
+    if active_tasks >= MAX_CONCURRENT_TASKS:
         raise HTTPException(status_code=400, detail="Maximum number of concurrent tasks reached")
 
     try:
@@ -135,12 +150,20 @@ async def start(batch_id: str):
             "batch_id": batch_id,
         }
     except Exception as e:
-        # Clean up task if it exists
+        # Clean up task if it exists and propagate the error
         if batch_id in tasks:
-            tasks[batch_id].cancel()
+            task = tasks[batch_id]
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
             del tasks[batch_id]
-        # Re-raise as HTTP exception
-        raise HTTPException(status_code=500, detail=str(e))
+        # Re-raise as HTTP exception if it's not already one
+        if not isinstance(e, HTTPException):
+            raise HTTPException(status_code=500, detail=str(e))
+        raise
 
 
 @app.delete("/stream/{batch_id}")
@@ -150,8 +173,16 @@ async def data_stop(batch_id: str):
 
 @app.get("/stream/{batch_id}")
 async def stream(batch_id: str):
+    # Check if task exists or has data
     if batch_id not in tasks:
-        raise HTTPException(status_code=404, detail="Task not found")
+        # Check if there's any data for this batch before failing
+        result = app.state.db.execute(
+            'SELECT COUNT(*) FROM data WHERE batch_id = ?',
+            [batch_id]
+        ).fetchone()
+
+        if not result or result[0] == 0:
+            raise HTTPException(status_code=404, detail="Task not found")
 
     async def _gen():
         while True:
