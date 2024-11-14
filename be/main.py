@@ -70,8 +70,13 @@ async def get_tasks():
 
 
 async def insert_task(batch_id: str):
+    print(f"Starting task for batch {batch_id}")
     try:
-        while not asyncio.current_task().cancelled():
+        while True:
+            # Check if task is cancelled before sleeping
+            if asyncio.current_task().cancelled():
+                break
+
             await asyncio.sleep(0.25)
             value = random.randint(0, 100)
 
@@ -86,31 +91,39 @@ async def insert_task(batch_id: str):
             )
     except asyncio.CancelledError:
         print(f"Task {batch_id} was cancelled")
-        # Remove the task from the tasks dict
-        if batch_id in tasks:
-            del tasks[batch_id]
         raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
-        # Remove the task from the tasks dict if it fails
+        raise
+    finally:
+        # Always clean up task in finally block
         if batch_id in tasks:
             del tasks[batch_id]
-        raise
 
 
 @app.post("/stream/{batch_id}")
 async def start(batch_id: str):
-    # Check for duplicate task
+    # Check for duplicate task first
     if batch_id in tasks:
         raise HTTPException(status_code=400, detail="Task already exists")
 
-    # Check concurrent task limit
+    # Then check concurrent task limit
     if len(tasks) >= MAX_CONCURRENT_TASKS:
         raise HTTPException(status_code=400, detail="Maximum number of concurrent tasks reached")
 
-    # Create new task
+    # Create new task and store it before any potential errors
     task = asyncio.create_task(insert_task(batch_id))
     tasks[batch_id] = task
+
+    # Wait a short time to ensure task starts
+    await asyncio.sleep(0.1)
+
+    # Check if task is still running
+    if task.done():
+        # If task failed, remove it and raise the error
+        if task.exception():
+            del tasks[batch_id]
+            raise HTTPException(status_code=500, detail=str(task.exception()))
 
     return {
         "message": "Batch started",
