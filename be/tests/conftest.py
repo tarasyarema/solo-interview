@@ -116,5 +116,9 @@ async def test_db(setup_app):
     ''')
     db = AsyncDuckDBConnection(conn)
     app.state.db = db  # Set the database in app state
-    return db  # Return the connection directly instead of yielding
-    # Note: The connection will be closed by the setup_app fixture's cleanup
+    try:
+        yield db
+    finally:
+        await db.close()
+        if hasattr(app.state, 'db'):
+            delattr(app.state, 'db')

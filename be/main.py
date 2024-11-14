@@ -168,11 +168,13 @@ async def start(batch_id: str):
         return JSONResponse(
             status_code=200,
             content={
-                "status": "success",
+                "status": "started",
                 "task_id": batch_id
             }
         )
     except Exception as e:
+        if batch_id in app.state.tasks:
+            del app.state.tasks[batch_id]
         return JSONResponse(
             status_code=500,
             content={
