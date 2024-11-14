@@ -15,11 +15,8 @@ async def setup_app():
     try:
         yield app
     finally:
-        # Clean up tasks
+        # Clean up tasks - but don't cancel them, let clean_tasks handle that
         if hasattr(app.state, 'tasks'):
-            for task in app.state.tasks.values():
-                if isinstance(task, asyncio.Task) and not task.done():
-                    task.cancel()
             app.state.tasks = {}
 
 @pytest.fixture
@@ -38,16 +35,22 @@ async def clean_tasks():
 
     yield
 
-    # Clean up any remaining tasks
+    # Clean up any remaining tasks with a longer timeout
     if hasattr(app.state, 'tasks'):
         tasks = list(app.state.tasks.values())
         for task in tasks:
             if isinstance(task, asyncio.Task) and not task.done():
-                task.cancel()
+                print(f"Waiting for task to complete...")
                 try:
-                    await asyncio.wait_for(task, timeout=0.5)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass
+                    # Wait longer than the 2-second sleep in insert_task
+                    await asyncio.wait_for(task, timeout=3.0)
+                except asyncio.TimeoutError:
+                    print(f"Task timed out, cancelling...")
+                    task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=0.5)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
                 except Exception as e:
                     print(f"Error cleaning up task: {str(e)}")
 
@@ -92,6 +95,16 @@ async def test_db(setup_app):
         raise
 
     finally:
+        # Wait for any pending tasks before closing the database
+        if hasattr(app.state, 'tasks'):
+            tasks = list(app.state.tasks.values())
+            for task in tasks:
+                if isinstance(task, asyncio.Task) and not task.done():
+                    try:
+                        await asyncio.wait_for(task, timeout=3.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass
+
         # Clean up database connection
         if db:
             try:
