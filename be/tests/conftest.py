@@ -16,8 +16,8 @@ class AsyncDuckDBConnection:
         """Execute a query asynchronously."""
         try:
             if params is None:
-                return self.conn.execute(query)
-            return self.conn.execute(query, params)
+                return await asyncio.to_thread(self.conn.execute, query)
+            return await asyncio.to_thread(self.conn.execute, query, params)
         except Exception as e:
             print(f"Database error: {str(e)}")
             raise
@@ -25,8 +25,8 @@ class AsyncDuckDBConnection:
     async def close(self):
         """Close the database connection."""
         try:
-            if not self.conn.is_closed():
-                self.conn.close()
+            if not self.conn.closed():
+                await asyncio.to_thread(self.conn.close)
         except Exception as e:
             print(f"Error closing connection: {str(e)}")
             raise
@@ -41,32 +41,17 @@ class AsyncDuckDBConnection:
 
 @pytest.fixture(scope="function")
 async def setup_app():
-    """Set up the FastAPI application with a clean state for each test."""
-    # Initialize app state
-    if not hasattr(app.state, 'tasks'):
-        app.state.tasks = {}
-    else:
-        app.state.tasks.clear()
-
-    # Create a new in-memory DuckDB database for testing
-    conn = duckdb.connect(':memory:')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS data (
-            id INTEGER,
-            batch_id VARCHAR,
-            timestamp TIMESTAMP,
-            value INTEGER
-        )
-    ''')
-    db = AsyncDuckDBConnection(conn)
-    app.state.db = db
-
-    yield app
-
-    # Clean up database and tasks
-    if hasattr(app.state, 'db'):
-        await app.state.db.close()
-        delattr(app.state, 'db')
+    """Set up the FastAPI test application."""
+    app.state.tasks = {}  # Initialize tasks dictionary
+    try:
+        yield app
+    finally:
+        # Clean up tasks
+        if hasattr(app.state, 'tasks'):
+            for task in app.state.tasks.values():
+                if not task.done():
+                    task.cancel()
+            app.state.tasks = {}
 
 @pytest.fixture
 def test_client():
@@ -100,7 +85,7 @@ async def clean_tasks():
         app.state.tasks.clear()
 
 @pytest.fixture
-async def test_db(setup_app):
+async def test_db():
     """Create a test database connection."""
     # Create a new in-memory database for each test
     conn = duckdb.connect(':memory:')
@@ -113,8 +98,10 @@ async def test_db(setup_app):
         )
     ''')
     db = AsyncDuckDBConnection(conn)
-    app.state.db = db
-    yield db  # Return the connection directly
-    await db.close()
-    if hasattr(app.state, 'db'):
-        delattr(app.state, 'db')
+    app.state.db = db  # Set the database in app state before yielding
+    try:
+        yield db
+    finally:
+        await db.close()
+        if hasattr(app.state, 'db'):
+            delattr(app.state, 'db')
