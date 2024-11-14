@@ -10,7 +10,7 @@ export interface Home {
 
 export const handler: Handlers<Home> = {
   async GET(_req, ctx) {
-    const res = await fetch(new Request(`${API_URL}`));
+    const res = await fetch(`${API_URL}`);
     return ctx.render(await res.json());
   },
 };
