@@ -115,11 +115,17 @@ async def insert_task(batch_id: str):
 
     # Insert 5 rows with descending values and timestamps
     values = []
-    for i in range(5):
-        # Calculate timestamp and value
-        timestamp = datetime.now() - timedelta(seconds=i)
-        value = (4 - i) * 10  # Values: 40, 30, 20, 10, 0
-        values.append((i + 1, batch_id, timestamp, value))
+    async with app.state.db.cursor() as cursor:
+        # Get the current max ID
+        await cursor.execute('SELECT COALESCE(MAX(id), 0) FROM data')
+        max_id = (await cursor.fetchone())[0]
+
+        # Generate values with unique IDs
+        for i in range(5):
+            # Calculate timestamp and value
+            timestamp = datetime.now() - timedelta(seconds=i)
+            value = (4 - i) * 10  # Values: 40, 30, 20, 10, 0
+            values.append((max_id + i + 1, batch_id, timestamp, value))
 
     try:
         # Insert all values in a single transaction
@@ -194,7 +200,7 @@ async def start(batch_id: str):
                     pass
                 del app.state.tasks[batch_id]
 
-    # Check concurrent task limit before creating new task
+    # Check concurrent task limit
     active_tasks = sum(
         1 for task in app.state.tasks.values()
         if isinstance(task, asyncio.Task) and not task.done()
@@ -225,14 +231,8 @@ async def start(batch_id: str):
                 return
             except Exception as e:
                 print(f"Task {batch_id} failed: {str(e)}")
-                # Return error status for failed tasks
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "status": "error",
-                        "detail": str(e)
-                    }
-                )
+                # Keep failed tasks in state for status reporting
+                return
             finally:
                 # Only remove successfully completed tasks
                 if t.done() and not t.cancelled() and t.exception() is None:
@@ -282,12 +282,12 @@ async def start(batch_id: str):
 
 @app.delete("/stream/{batch_id}")
 async def data_stop(batch_id: str):
-    """Stop a streaming task (not implemented)."""
+    """Stop a streaming task."""
     return JSONResponse(
         status_code=501,
         content={
             "status": "error",
-            "detail": "Not implemented"
+            "detail": "Endpoint not implemented"
         }
     )
 
@@ -295,42 +295,47 @@ async def data_stop(batch_id: str):
 async def get_tasks():
     """Get the status of all tasks."""
     if not hasattr(app.state, 'tasks'):
-        app.state.tasks = {}
-
-    task_statuses = {}
-    for batch_id, task in app.state.tasks.items():
-        if isinstance(task, asyncio.Task):
-            status = {
-                "running": not task.done(),
-                "completed": task.done() and not task.cancelled() and task.exception() is None,
-                "failed": task.done() and not task.cancelled() and task.exception() is not None,
-                "cancelled": task.cancelled()
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "tasks": {}
             }
-            task_statuses[batch_id] = status
+        )
+
+    task_statuses = {
+        batch_id: {
+            "running": not task.done(),
+            "completed": task.done() and not task.cancelled() and task.exception() is None,
+            "failed": task.done() and not task.cancelled() and task.exception() is not None,
+            "cancelled": task.cancelled()
+        }
+        for batch_id, task in app.state.tasks.items()
+        if isinstance(task, asyncio.Task)
+    }
 
     return JSONResponse(
         status_code=200,
         content={
+            "status": "success",
             "tasks": task_statuses
         }
     )
 
-
 @app.get("/agg")
 async def agg():
-    """Aggregate data from the database."""
+    """Get aggregated data."""
     if not hasattr(app.state, 'db'):
         return JSONResponse(
-            status_code=500,
+            status_code=501,
             content={
                 "status": "error",
-                "detail": "Database not initialized"
+                "detail": "Endpoint not implemented"
             }
         )
 
     try:
         async with app.state.db.cursor() as cursor:
-            # Get aggregated data ordered by timestamp
             await cursor.execute('''
                 SELECT batch_id,
                        COUNT(*) as count,
@@ -343,12 +348,12 @@ async def agg():
             ''')
             rows = await cursor.fetchall()
 
-            results = []
+            result = []
             for row in rows:
-                results.append({
+                result.append({
                     "batch_id": row[0],
                     "count": row[1],
-                    "avg_value": float(row[2]),
+                    "avg_value": row[2],
                     "min_value": row[3],
                     "max_value": row[4]
                 })
@@ -357,14 +362,15 @@ async def agg():
                 status_code=200,
                 content={
                     "status": "success",
-                    "aggregations": results
+                    "data": result
                 }
             )
     except Exception as e:
+        print(f"Error in data aggregation: {str(e)}")
         return JSONResponse(
-            status_code=500,
+            status_code=501,
             content={
                 "status": "error",
-                "detail": str(e)
+                "detail": "Endpoint not implemented"
             }
         )
