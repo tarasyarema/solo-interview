@@ -125,49 +125,42 @@ async def insert_task(batch_id: str):
 
 @app.post("/stream/{batch_id}")
 async def start(batch_id: str):
-    # Check for duplicate task first
     if batch_id in tasks:
-        if not tasks[batch_id].done():
-            raise HTTPException(status_code=400, detail="Task already exists")
-        # If task is done, remove it and allow new task
-        del tasks[batch_id]
+        raise HTTPException(status_code=400, detail="Task already exists")
 
-    # Then check concurrent task limit
-    active_tasks = len([t for t in tasks.values() if not t.done()])
-    if active_tasks >= MAX_CONCURRENT_TASKS:
-        raise HTTPException(status_code=400, detail="Maximum number of concurrent tasks reached")
+    if len(tasks) >= MAX_CONCURRENT_TASKS:
+        raise HTTPException(status_code=429, detail="Too many concurrent tasks")
 
     try:
-        # Create new task and store it before any potential errors
+        # Create and start the task
         task = asyncio.create_task(insert_task(batch_id))
         tasks[batch_id] = task
 
-        # Wait a short time to ensure task starts and inserts at least one value
-        await asyncio.sleep(0.25)
+        # Wait a short time to ensure task starts and inserts initial data
+        await asyncio.sleep(0.1)
 
-        # Check if task failed immediately
-        if task.done() and task.exception():
-            raise task.exception()
+        # Check if task failed to start properly
+        if task.done():
+            if task.exception():
+                raise task.exception()
+            raise HTTPException(status_code=500, detail="Task failed to start properly")
 
-        return {
-            "message": "Batch started",
-            "batch_id": batch_id,
-        }
+        return {"status": "started", "batch_id": batch_id}
+
     except Exception as e:
-        # Clean up task if it exists and propagate the error
+        # Clean up task if it exists
         if batch_id in tasks:
             task = tasks[batch_id]
-            if not task.done():
-                task.cancel()
+            task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
             del tasks[batch_id]
-        # Re-raise as HTTP exception if it's not already one
-        if not isinstance(e, HTTPException):
-            raise HTTPException(status_code=500, detail=str(e))
-        raise
+
+        if isinstance(e, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/stream/{batch_id}")
