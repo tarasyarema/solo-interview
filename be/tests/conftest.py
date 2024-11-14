@@ -113,7 +113,12 @@ async def clean_tasks():
     if hasattr(app.state, 'tasks'):
         tasks = list(app.state.tasks.values())
         for task in tasks:
-            if not task.done():
+            if isinstance(task, asyncio.Task) and not task.done():
                 task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    print(f"Error cleaning up task: {str(e)}")
         app.state.tasks.clear()
