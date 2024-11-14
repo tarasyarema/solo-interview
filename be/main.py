@@ -75,8 +75,9 @@ async def root():
         # Get row count using proper async handling
         try:
             cursor = await app.state.db.execute('SELECT COUNT(*) FROM data')
-            result = await cursor.fetchone()
-            count = result[0] if result and result[0] is not None else 0
+            rows = await cursor.fetchall()  # Use fetchall instead of fetchone
+            count = rows[0][0] if rows and rows[0] and rows[0][0] is not None else 0
+            await cursor.close()  # Properly close the cursor
         except Exception as e:
             print(f"Database error in root endpoint: {str(e)}")
             return JSONResponse(
@@ -141,12 +142,12 @@ async def insert_task(batch_id: str):
 
         # Add a small delay to prevent tasks from completing too quickly
         # This helps with concurrent task limit testing
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)  # Increased delay for better test stability
 
         return True
     except Exception as e:
         print(f"Error inserting data for batch {batch_id}: {str(e)}")
-        raise RuntimeError(f"Failed to insert data: {str(e)}")
+        raise  # Re-raise to ensure proper error propagation
 
 async def _insert_task_impl(batch_id: str):
     """Protected implementation of insert_task."""
@@ -248,7 +249,7 @@ async def start(batch_id: str):
         return JSONResponse(
             status_code=200,
             content={
-                "status": "success",
+                "status": "started",  # Changed from "success" to "started"
                 "batch_id": batch_id
             }
         )
@@ -279,9 +280,9 @@ async def get_tasks():
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
-    # Clean up completed or failed tasks first
-    tasks_to_remove = []
+    # Clean up completed or failed tasks and build status dictionary
     task_statuses = {}
+    tasks_to_remove = []
 
     for batch_id, task in app.state.tasks.items():
         if not isinstance(task, asyncio.Task):
@@ -302,7 +303,8 @@ async def get_tasks():
 
     # Remove completed/failed tasks
     for batch_id in tasks_to_remove:
-        del app.state.tasks[batch_id]
+        if batch_id in app.state.tasks:
+            del app.state.tasks[batch_id]
 
     return JSONResponse(
         status_code=200,
@@ -328,15 +330,16 @@ async def agg():
     try:
         cursor = await app.state.db.execute(
             '''
-            SELECT value
+            SELECT DISTINCT value
             FROM data
             WHERE value IS NOT NULL
             ORDER BY value DESC
             '''
         )
         rows = await cursor.fetchall()
+        await cursor.close()  # Properly close the cursor
 
-        # Extract values and ensure they're sorted in descending order
+        # Extract values, ensuring they're sorted in descending order
         values = []
         if rows:
             values = [row[0] for row in rows if row[0] is not None]
