@@ -42,13 +42,14 @@ async def clean_tasks():
             if isinstance(task, asyncio.Task) and not task.done():
                 print(f"Waiting for task to complete...")
                 try:
-                    # Wait longer than the 2-second sleep in insert_task
-                    await asyncio.wait_for(task, timeout=3.0)
+                    # Increase timeout to allow for transaction completion
+                    await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
                 except asyncio.TimeoutError:
                     print(f"Task timed out, cancelling...")
                     task.cancel()
                     try:
-                        await asyncio.wait_for(task, timeout=0.5)
+                        # Give cancelled tasks a chance to cleanup
+                        await asyncio.wait_for(task, timeout=1.0)
                     except (asyncio.CancelledError, asyncio.TimeoutError):
                         pass
                 except Exception as e:
@@ -101,9 +102,14 @@ async def test_db(setup_app):
             for task in tasks:
                 if isinstance(task, asyncio.Task) and not task.done():
                     try:
-                        await asyncio.wait_for(task, timeout=3.0)
+                        # Shield tasks from cancellation during cleanup
+                        await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
                     except (asyncio.TimeoutError, asyncio.CancelledError):
-                        pass
+                        task.cancel()
+                        try:
+                            await asyncio.wait_for(task, timeout=1.0)
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                            pass
 
         # Clean up database connection
         if db:
