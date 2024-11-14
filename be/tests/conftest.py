@@ -21,13 +21,19 @@ def test_client():
 class AsyncDuckDBConnection:
     def __init__(self, connection):
         self.connection = connection
+        self._closed = False
 
     def execute(self, query, parameters=None):
+        if self._closed:
+            raise RuntimeError("Connection is closed")
         return self.connection.execute(query, parameters)
 
     def close(self):
-        if not self.connection.is_closed():
-            self.connection.close()
+        if not self._closed:
+            try:
+                self.connection.close()
+            finally:
+                self._closed = True
 
 @pytest.fixture
 def test_db():

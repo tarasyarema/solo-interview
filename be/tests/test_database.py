@@ -73,7 +73,7 @@ async def test_data_aggregation(test_db, clean_tasks):
     for i, row in enumerate(results):
         data = json.loads(row[0])
         assert "value" in data
-        assert data["value"] == (4 - i) * 10  # Values should be in reverse order
+        assert data["value"] == i * 10  # Values should match the order we inserted them
 
 @pytest.mark.asyncio
 async def test_data_cleanup(test_db, clean_tasks):

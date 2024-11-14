@@ -2,10 +2,17 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import asyncio
+import json
 
 @pytest.mark.asyncio
 async def test_root_endpoint(test_client, test_db):
     """Test the root endpoint returns correct row and task counts"""
+    # Insert some test data
+    test_db.execute(
+        'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, CURRENT_TIMESTAMP)',
+        ("test_batch", json.dumps({"value": 42}))
+    )
+
     response = test_client.get("/")
     assert response.status_code == 200
     data = response.json()
@@ -13,6 +20,7 @@ async def test_root_endpoint(test_client, test_db):
     assert "task_count" in data
     assert isinstance(data["row_count"], int)
     assert isinstance(data["task_count"], int)
+    assert data["row_count"] > 0  # Should have our test data
 
 @pytest.mark.asyncio
 async def test_create_stream_task(test_client, test_db, clean_tasks):
@@ -24,6 +32,16 @@ async def test_create_stream_task(test_client, test_db, clean_tasks):
     assert data["message"] == "Batch started"
     assert data["batch_id"] == batch_id
 
+    # Wait for task to start and insert data
+    await asyncio.sleep(0.5)
+
+    # Verify data was inserted
+    result = test_db.execute(
+        'SELECT COUNT(*) FROM data WHERE batch_id = ?',
+        [batch_id]
+    ).fetchone()
+    assert result[0] > 0
+
 @pytest.mark.asyncio
 async def test_stream_endpoint(test_client, test_db, clean_tasks):
     """Test the streaming endpoint returns SSE data"""
@@ -32,6 +50,16 @@ async def test_stream_endpoint(test_client, test_db, clean_tasks):
     # First create the task
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
+
+    # Wait for task to start and insert data
+    await asyncio.sleep(0.5)
+
+    # Verify data was inserted
+    result = test_db.execute(
+        'SELECT COUNT(*) FROM data WHERE batch_id = ?',
+        [batch_id]
+    ).fetchone()
+    assert result[0] > 0
 
     # Now test the stream
     response = test_client.get(f"/stream/{batch_id}")
@@ -50,7 +78,7 @@ async def test_stream_endpoint(test_client, test_db, clean_tasks):
     try:
         await asyncio.wait_for(read_stream(), timeout=2.0)
         data_line = content.decode().split("\n")[0].removeprefix("data: ")
-        assert "key" in data_line
+        assert "value" in data_line
     except asyncio.TimeoutError:
         pytest.fail("Timeout waiting for stream data")
 
@@ -82,7 +110,7 @@ async def test_unimplemented_agg_endpoint(test_client):
     assert data["detail"] == "Not implemented"
 
 @pytest.mark.asyncio
-async def test_concurrent_task_limit(test_client, clean_tasks):
+async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
     """Test that we can't create more than 5 concurrent tasks"""
     # Successfully create 5 tasks
     for i in range(5):
@@ -90,6 +118,15 @@ async def test_concurrent_task_limit(test_client, clean_tasks):
         assert response.status_code == 200
         data = response.json()
         assert data["message"] == "Batch started"
+        await asyncio.sleep(0.5)  # Give each task time to start and insert data
+
+    # Verify all tasks are running and have data
+    for i in range(5):
+        result = test_db.execute(
+            'SELECT COUNT(*) FROM data WHERE batch_id = ?',
+            [f"batch_{i}"]
+        ).fetchone()
+        assert result[0] > 0
 
     # Attempt to create 6th task should fail
     response = test_client.post("/stream/batch_6")

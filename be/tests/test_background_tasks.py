@@ -13,12 +13,19 @@ async def test_task_creation_and_cleanup(test_client, test_db):
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
 
-    # Wait a bit for task to start
-    await asyncio.sleep(0.1)
+    # Wait for task to start and insert some data
+    await asyncio.sleep(0.5)
 
     # Verify task exists and is running
     assert batch_id in tasks
     assert not tasks[batch_id].done()
+
+    # Verify data was inserted
+    result = test_db.execute(
+        'SELECT COUNT(*) FROM data WHERE batch_id = ?',
+        [batch_id]
+    ).fetchone()
+    assert result[0] > 0
 
     # Clean up
     task = tasks[batch_id]
@@ -41,12 +48,18 @@ async def test_task_management(test_client, test_db):
     for batch_id in batch_ids:
         response = test_client.post(f"/stream/{batch_id}")
         assert response.status_code == 200
-        await asyncio.sleep(0.1)  # Give each task time to start
+        await asyncio.sleep(0.5)  # Give each task time to start and insert data
 
     # Verify all tasks are running
     assert len(tasks) == 3
     for batch_id in batch_ids:
         assert not tasks[batch_id].done()
+        # Verify data was inserted
+        result = test_db.execute(
+            'SELECT COUNT(*) FROM data WHERE batch_id = ?',
+            [batch_id]
+        ).fetchone()
+        assert result[0] > 0
 
     # Clean up tasks
     for batch_id in batch_ids:
@@ -57,6 +70,7 @@ async def test_task_management(test_client, test_db):
             await task
         except asyncio.CancelledError:
             pass
+
 
 @pytest.mark.asyncio
 async def test_insert_task_data_generation(test_db):
@@ -70,7 +84,7 @@ async def test_insert_task_data_generation(test_db):
         tasks[batch_id] = task
 
         # Allow some data to be generated
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.5)
 
         # Cancel the task
         task.cancel()
@@ -113,7 +127,7 @@ async def test_duplicate_task_creation(test_client, test_db):
     # Create first task
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
-    await asyncio.sleep(0.1)  # Give task time to start
+    await asyncio.sleep(0.5)  # Give task time to start
 
     # Attempt to create duplicate task
     response = test_client.post(f"/stream/{batch_id}")
