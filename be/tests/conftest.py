@@ -5,26 +5,39 @@ from fastapi.testclient import TestClient
 from main import app
 import pytest_asyncio
 
-@pytest_asyncio.fixture(scope="function")
+@pytest.fixture(scope="function")
 async def event_loop():
-    """Create and provide a new event loop for each test."""
+    """Create an instance of the default event loop for each test case."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     yield loop
     # Clean up pending tasks
     pending = asyncio.all_tasks(loop)
     for task in pending:
-        if not task.done():
-            task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
+        task.cancel()
+
+    # Wait for tasks to complete with a timeout
+    if pending:
+        try:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    loop.run_until_complete(loop.shutdown_asyncgens())
     loop.close()
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(scope="function")
 async def setup_app():
-    """Setup app state before each test."""
-    # Initialize database
-    db = duckdb.connect(':memory:')
-    db.execute('''
+    """Set up the FastAPI application with a clean state for each test."""
+    # Initialize app state
+    if not hasattr(app.state, 'tasks'):
+        app.state.tasks = {}
+    else:
+        app.state.tasks.clear()
+
+    # Create a new in-memory DuckDB database for testing
+    conn = duckdb.connect(':memory:')
+    conn.execute('''
         CREATE TABLE IF NOT EXISTS data (
             id INTEGER,
             batch_id VARCHAR,
@@ -32,22 +45,12 @@ async def setup_app():
             value INTEGER
         )
     ''')
-    app.state.db = db
-    app.state.tasks = {}
+    app.state.db = AsyncDuckDBConnection(conn)
 
-    yield
+    yield app
 
-    # Clean up
-    if hasattr(app.state, 'tasks'):
-        tasks = list(app.state.tasks.values())
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        app.state.tasks.clear()
-
-    if hasattr(app.state, 'db'):
-        app.state.db.close()
+    # Clean up database
+    await app.state.db.close()
 
 @pytest.fixture
 def test_client():
@@ -110,6 +113,8 @@ async def clean_tasks():
     # Setup - ensure tasks dictionary exists
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
+    else:
+        app.state.tasks.clear()
 
     yield
 
@@ -120,7 +125,11 @@ async def clean_tasks():
             if isinstance(task, asyncio.Task) and not task.done():
                 task.cancel()
                 try:
-                    await asyncio.wait_for(task, timeout=0.5)
+                    # Wait for task to be cancelled with timeout
+                    await asyncio.wait_for(
+                        asyncio.shield(task),  # Shield to prevent cancellation propagation
+                        timeout=0.5
+                    )
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
                 except Exception as e:
@@ -131,3 +140,13 @@ async def clean_tasks():
 
         # Wait a bit to ensure all tasks are properly cleaned up
         await asyncio.sleep(0.1)
+
+        # Ensure event loop is clean
+        loop = asyncio.get_event_loop()
+        for task in asyncio.all_tasks(loop):
+            if not task.done() and task != asyncio.current_task():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=0.1)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
