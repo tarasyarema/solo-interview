@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import asyncio
 import json
+from main import app, tasks, MAX_CONCURRENT_TASKS
 
 @pytest.mark.asyncio
 async def test_root_endpoint(test_client, test_db):
@@ -64,13 +65,23 @@ async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
     assert "Task for batch test_batch_duplicate already exists" in data["detail"]
 
 @pytest.mark.asyncio
-async def test_unimplemented_tasks_endpoint(test_client):
-    """Test that /tasks endpoint returns 501 Not Implemented"""
+async def test_tasks_endpoint(test_client, clean_tasks):
+    """Test that /tasks endpoint returns list of active tasks"""
+    # Create a test task first
+    batch_id = "test_batch_tasks"
+    response = test_client.post(f"/stream/{batch_id}")
+    assert response.status_code == 200
+
+    # Wait for task to start
+    await asyncio.sleep(0.2)
+
+    # Check tasks endpoint
     response = test_client.get("/tasks")
-    assert response.status_code == 501
+    assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "error"
-    assert data["detail"] == "Not implemented"
+    assert data["status"] == "success"
+    assert isinstance(data["tasks"], list)
+    assert batch_id in data["tasks"]
 
 @pytest.mark.asyncio
 async def test_unimplemented_stop_endpoint(test_client):
@@ -93,28 +104,40 @@ async def test_unimplemented_agg_endpoint(test_client):
 @pytest.mark.asyncio
 async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
     """Test that we can't create more than MAX_CONCURRENT_TASKS tasks"""
-    from main import MAX_CONCURRENT_TASKS
+    try:
+        # Successfully create MAX_CONCURRENT_TASKS tasks
+        for i in range(MAX_CONCURRENT_TASKS):
+            response = test_client.post(f"/stream/batch_{i}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "started"
+            assert data["batch_id"] == f"batch_{i}"
+            await asyncio.sleep(0.2)  # Wait for task to start
 
-    # Successfully create MAX_CONCURRENT_TASKS tasks
-    for i in range(MAX_CONCURRENT_TASKS):
-        response = test_client.post(f"/stream/batch_{i}")
-        assert response.status_code == 200
+        # Verify all tasks are running and have data
+        for i in range(MAX_CONCURRENT_TASKS):
+            result = test_db.execute(
+                'SELECT COUNT(*) FROM data WHERE batch_id = ?',
+                [f"batch_{i}"]
+            ).fetchone()
+            assert result[0] > 0
+
+        # Attempt to create another task should fail with 429 Too Many Requests
+        response = test_client.post("/stream/batch_extra")
+        assert response.status_code == 429
         data = response.json()
-        assert data["status"] == "started"
-        assert data["batch_id"] == f"batch_{i}"
-        await asyncio.sleep(0.2)  # Reduced wait time
+        assert data["status"] == "error"
+        assert "Maximum number of concurrent tasks reached" in data["detail"]
 
-    # Verify all tasks are running and have data
-    for i in range(MAX_CONCURRENT_TASKS):
-        result = test_db.execute(
-            'SELECT COUNT(*) FROM data WHERE batch_id = ?',
-            [f"batch_{i}"]
-        ).fetchone()
-        assert result[0] > 0
-
-    # Attempt to create another task should fail with 429 Too Many Requests
-    response = test_client.post("/stream/batch_extra")
-    assert response.status_code == 429
-    data = response.json()
-    assert data["status"] == "error"
-    assert "Maximum number of concurrent tasks reached" in data["detail"]
+    finally:
+        # Clean up all tasks
+        for i in range(MAX_CONCURRENT_TASKS):
+            batch_id = f"batch_{i}"
+            if batch_id in tasks:
+                task = tasks[batch_id]
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except:
+                        pass

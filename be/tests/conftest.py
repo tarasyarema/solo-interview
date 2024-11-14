@@ -2,16 +2,52 @@ import pytest
 import asyncio
 import duckdb
 from fastapi.testclient import TestClient
-from main import app, tasks
+from main import app
+import pytest_asyncio
 
-@pytest.fixture(scope="function")
-def event_loop():
+@pytest_asyncio.fixture(scope="function")
+async def event_loop():
     """Create and provide a new event loop for each test."""
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
+    loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     yield loop
+    # Clean up pending tasks
+    pending = asyncio.all_tasks(loop)
+    for task in pending:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
     loop.close()
+
+@pytest.fixture(autouse=True)
+async def setup_app():
+    """Setup app state before each test."""
+    # Initialize database
+    db = duckdb.connect(':memory:')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS data (
+            id INTEGER,
+            batch_id VARCHAR,
+            data JSON,
+            timestamp TIMESTAMP
+        )
+    ''')
+    app.state.db = db
+    app.state.tasks = {}
+
+    yield
+
+    # Clean up
+    if hasattr(app.state, 'tasks'):
+        tasks = list(app.state.tasks.values())
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        app.state.tasks.clear()
+
+    if hasattr(app.state, 'db'):
+        app.state.db.close()
 
 @pytest.fixture
 def test_client():
@@ -71,27 +107,14 @@ def test_db():
 
 @pytest.fixture(autouse=True)
 async def clean_tasks():
-    """Clean up any existing tasks before and after each test."""
-    # Clear tasks dict before each test
-    for task_id, task in list(tasks.items()):
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-    tasks.clear()
-
+    """Clean up tasks after each test."""
     yield
 
-    # Clean up tasks after test
-    for task_id, task in list(tasks.items()):
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        elif task.done() and task.exception():
-            print(f"Task {task_id} failed with: {task.exception()}")
-    tasks.clear()
+    # Clean up any remaining tasks
+    if hasattr(app.state, 'tasks'):
+        tasks = list(app.state.tasks.values())
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        app.state.tasks.clear()

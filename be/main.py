@@ -1,14 +1,14 @@
-from contextlib import asynccontextmanager
 import asyncio
-import random
 from datetime import datetime
+import random
 from json import dumps
-from typing import Dict, Optional
-
 import duckdb
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+
+# Initialize FastAPI app with lifespan management
 
 MAX_CONCURRENT_TASKS = 3
 
@@ -20,25 +20,41 @@ tasks: dict[str, asyncio.Task] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create and configure database
-    db = duckdb.connect('data.db')
-    db.execute('''
-        CREATE TABLE IF NOT EXISTS data (
-            id BIGINT,
-            batch_id VARCHAR,
-            data VARCHAR,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS idx_data_batch_id ON data (batch_id);
-    ''')
+    """Lifespan context manager for FastAPI app."""
+    print("Starting up...")
+    try:
+        # Initialize database
+        db = duckdb.connect('test_db.duckdb')
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS data (
+                id INTEGER,
+                batch_id VARCHAR,
+                data JSON,
+                timestamp TIMESTAMP
+            )
+        ''')
+        app.state.db = db
 
-    # Store database connection in app state
-    app.state.db = db
+        # Initialize tasks dictionary
+        app.state.tasks = {}
 
-    yield
+        yield
 
-    # Cleanup
-    app.state.db.close()
+    finally:
+        print("Shutting down...")
+        # Cancel all running tasks
+        if hasattr(app.state, 'tasks'):
+            for batch_id, task in app.state.tasks.items():
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+        # Close database connection
+        if hasattr(app.state, 'db'):
+            app.state.db.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -73,133 +89,115 @@ async def get_tasks():
 
 
 async def insert_task(batch_id: str):
-    """Insert data for a batch in a continuous loop."""
+    """Insert random data for a batch."""
     print(f"Starting task for batch {batch_id}")
     try:
-        # Initial data insertion
+        # Initial data insertion to mark task as started
         print(f"Inserting initial data for batch {batch_id}")
-        value = random.randint(0, 100)
-        app.state.db.execute(
-            'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
-            (batch_id, dumps({"value": value}), datetime.now())
-        )
+        try:
+            value = random.randint(0, 100)
+            app.state.db.execute(
+                'INSERT INTO data (id, batch_id, data, timestamp) VALUES (?, ?, ?, ?)',
+                (value, batch_id, dumps({"value": value}), datetime.now())
+            )
+            # Add initial delay to ensure task is running during test assertions
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            print(f"Error inserting initial data for batch {batch_id}: {str(e)}")
+            if batch_id in app.state.tasks:
+                app.state.tasks.pop(batch_id)
+            raise
 
-        # Add initial delay to ensure task is running during test assertions
-        await asyncio.sleep(0.2)
-
-        # Continuous insertion until cancelled
         while True:
             try:
                 value = random.randint(0, 100)
                 app.state.db.execute(
-                    'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
-                    (batch_id, dumps({"value": value}), datetime.now())
+                    'INSERT INTO data (id, batch_id, data, timestamp) VALUES (?, ?, ?, ?)',
+                    (value, batch_id, dumps({"value": value}), datetime.now())
                 )
-                # Add a shorter delay between insertions
                 await asyncio.sleep(0.1)
             except asyncio.CancelledError:
                 print(f"Task {batch_id} cancelled during execution")
-                if batch_id in tasks:
-                    tasks.pop(batch_id)
+                if batch_id in app.state.tasks:
+                    app.state.tasks.pop(batch_id)
                 raise
             except Exception as e:
                 print(f"Error in task {batch_id}: {str(e)}")
-                if batch_id in tasks:
-                    tasks.pop(batch_id)
+                if batch_id in app.state.tasks:
+                    app.state.tasks.pop(batch_id)
                 raise
 
     except asyncio.CancelledError:
         print(f"Task {batch_id} cancelled during startup")
-        if batch_id in tasks:
-            tasks.pop(batch_id)
+        if batch_id in app.state.tasks:
+            app.state.tasks.pop(batch_id)
         raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
-        if batch_id in tasks:
-            tasks.pop(batch_id)
+        if batch_id in app.state.tasks:
+            app.state.tasks.pop(batch_id)
         raise
 
 
 @app.post("/stream/{batch_id}")
-async def start(batch_id: str, request: Request):
-    """Start a new data stream for a batch."""
-    try:
-        # Check if task already exists BEFORE creating new task
-        if batch_id in tasks:
-            if not tasks[batch_id].done():
-                return JSONResponse(
-                    status_code=400,
-                    content={"status": "error", "detail": f"Task for batch {batch_id} already exists"}
-                )
-            # Remove completed/failed task
-            tasks.pop(batch_id)
+async def start(batch_id: str):
+    """Start a streaming task for a batch."""
+    print(f"Starting stream for batch {batch_id}")
 
-        # Check concurrent task limit BEFORE creating new task
-        active_tasks = len([t for t in tasks.values() if not t.done()])
+    # Check if task already exists
+    if hasattr(app.state, 'tasks') and batch_id in app.state.tasks:
+        if not app.state.tasks[batch_id].done():
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "detail": f"Task for batch {batch_id} already exists"
+                }
+            )
+        else:
+            app.state.tasks.pop(batch_id)
+
+    # Check concurrent task limit
+    if hasattr(app.state, 'tasks'):
+        active_tasks = len([t for t in app.state.tasks.values() if not t.done()])
         if active_tasks >= MAX_CONCURRENT_TASKS:
             return JSONResponse(
                 status_code=429,
-                content={"status": "error", "detail": "Maximum number of concurrent tasks reached"}
+                content={
+                    "status": "error",
+                    "detail": "Maximum number of concurrent tasks reached"
+                }
             )
 
-        # Create task
+    try:
+        # Create and store the task
         task = asyncio.create_task(insert_task(batch_id))
-        tasks[batch_id] = task
+        if not hasattr(app.state, 'tasks'):
+            app.state.tasks = {}
+        app.state.tasks[batch_id] = task
 
-        # Set up cleanup for when client disconnects
+        # Create cleanup task
         async def cleanup_task():
-            """Clean up task when client disconnects."""
             try:
-                if batch_id in tasks:
-                    task = tasks[batch_id]
-                    if not task.done():
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception:
-                            pass
-                    if batch_id in tasks:  # Check again in case task was removed
-                        tasks.pop(batch_id)
+                await task
+            except asyncio.CancelledError:
+                print(f"Task {batch_id} was cancelled")
             except Exception as e:
-                print(f"Error cleaning up task {batch_id}: {str(e)}")
+                print(f"Task {batch_id} failed: {str(e)}")
+            finally:
+                if batch_id in app.state.tasks:
+                    app.state.tasks.pop(batch_id)
 
-        # Store cleanup task in request state
-        request.state.cleanup_tasks = getattr(request.state, 'cleanup_tasks', [])
-        cleanup_coro = cleanup_task()
-        request.state.cleanup_tasks.append(cleanup_coro)
+        asyncio.create_task(cleanup_task())
 
-        # Wait briefly to ensure task starts
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
-        except asyncio.TimeoutError:
-            # Task is still running, which is good
-            pass
-        except Exception as e:
-            # Task failed to start
-            if batch_id in tasks:
-                tasks.pop(batch_id)
-            return JSONResponse(
-                status_code=500,
-                content={"status": "error", "detail": str(e)}
-            )
-
-        return {"status": "started", "batch_id": batch_id}
+        return JSONResponse(
+            status_code=200,
+            content={"status": "started", "batch_id": batch_id}
+        )
 
     except Exception as e:
-        # Clean up task if it exists
-        if batch_id in tasks:
-            task = tasks.pop(batch_id)
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    pass
-
+        if batch_id in app.state.tasks:
+            app.state.tasks.pop(batch_id)
         return JSONResponse(
             status_code=500,
             content={"status": "error", "detail": str(e)}
@@ -218,9 +216,10 @@ async def data_stop(batch_id: str):
 @app.get("/tasks")
 async def get_tasks():
     """Get list of running tasks."""
+    active_tasks = [batch_id for batch_id, task in tasks.items() if not task.done()]
     return JSONResponse(
-        status_code=501,
-        content={"status": "error", "detail": "Not implemented"}
+        status_code=200,
+        content={"status": "success", "tasks": active_tasks}
     )
 
 
