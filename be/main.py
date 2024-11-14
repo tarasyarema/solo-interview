@@ -201,27 +201,9 @@ async def start(batch_id: str):
 @app.delete("/stream/{batch_id}")
 async def data_stop(batch_id: str):
     """Stop a streaming task."""
-    if not hasattr(app.state, 'tasks'):
-        app.state.tasks = {}
-
-    if batch_id in app.state.tasks:
-        task = app.state.tasks[batch_id]
-        if isinstance(task, asyncio.Task) and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            del app.state.tasks[batch_id]
-            return JSONResponse(
-                status_code=200,
-                content={"status": "success", "detail": f"Task {batch_id} stopped"}
-            )
-
-
     return JSONResponse(
-        status_code=404,
-        content={"status": "error", "detail": f"Task {batch_id} not found"}
+        status_code=501,
+        content={"status": "error", "detail": "Not implemented"}
     )
 
 
@@ -231,9 +213,12 @@ async def get_tasks():
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
+    # Create a copy of tasks for safe iteration
+    tasks_copy = dict(app.state.tasks)
+
     # Create a dictionary of task status
     task_status = {}
-    for batch_id, task in app.state.tasks.items():
+    for batch_id, task in tasks_copy.items():
         if isinstance(task, asyncio.Task):
             if task.done():
                 try:
@@ -241,13 +226,9 @@ async def get_tasks():
                     task_status[batch_id] = True
                 except asyncio.CancelledError:
                     # Task was cancelled, don't include it
-                    if batch_id in app.state.tasks:
-                        del app.state.tasks[batch_id]
+                    continue
                 except Exception:
                     task_status[batch_id] = False
-                    # Only remove failed tasks
-                    if batch_id in app.state.tasks:
-                        del app.state.tasks[batch_id]
             else:
                 task_status[batch_id] = True
 
@@ -260,31 +241,7 @@ async def get_tasks():
 @app.get("/agg")
 async def agg():
     """Get aggregated data."""
-    if not hasattr(app.state, 'db'):
-        return JSONResponse(
-            status_code=501,
-            content={"status": "error", "detail": "Not implemented"}
-        )
-
-    try:
-        result = app.state.db.execute('''
-            SELECT batch_id, timestamp, value
-            FROM data
-            ORDER BY timestamp DESC
-            LIMIT 1
-        ''').fetchone()
-
-        if result:
-            return JSONResponse(
-                status_code=501,
-                content={"status": "error", "detail": "Not implemented"}
-            )
-        return JSONResponse(
-            status_code=501,
-            content={"status": "error", "detail": "Not implemented"}
-        )
-    except Exception as e:
-        return JSONResponse(
-            status_code=501,
-            content={"status": "error", "detail": "Not implemented"}
-        )
+    return JSONResponse(
+        status_code=501,
+        content={"status": "error", "detail": "Not implemented"}
+    )
