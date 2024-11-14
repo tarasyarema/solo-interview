@@ -4,14 +4,13 @@ from fastapi.testclient import TestClient
 import duckdb
 from pathlib import Path
 import os
-from contextlib import asynccontextmanager
 from main import app, tasks
 
 @pytest.fixture
-async def test_client():
+def test_client():
     """Create a test client with its own event loop."""
-    client = TestClient(app)
-    yield client
+    with TestClient(app) as client:
+        yield client
 
 class AsyncDuckDBConnection:
     """Wrapper for DuckDB connection to support async context manager for transactions."""
@@ -21,22 +20,11 @@ class AsyncDuckDBConnection:
     def execute(self, *args, **kwargs):
         return self.conn.execute(*args, **kwargs)
 
-    @asynccontextmanager
-    async def transaction(self):
-        """Async context manager for transactions."""
-        self.conn.execute('BEGIN TRANSACTION')
-        try:
-            yield
-            self.conn.execute('COMMIT')
-        except Exception:
-            self.conn.execute('ROLLBACK')
-            raise
-
     def close(self):
         self.conn.close()
 
 @pytest.fixture
-async def test_db():
+def test_db():
     """Create a fresh test database for each test."""
     # Store the original database connection
     original_db = app.state.db if hasattr(app.state, 'db') else None
@@ -76,34 +64,35 @@ async def test_db():
         delattr(app.state, 'db')
 
 @pytest.fixture(autouse=True)
-async def clean_tasks():
+def clean_tasks():
     """Clean up any existing tasks before and after each test."""
-    # Cancel any existing tasks
-    for task_id, task in tasks.items():
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-    tasks.clear()
+    # Create a new event loop for cleanup
+    loop = asyncio.new_event_loop()
+
+    def cleanup_tasks():
+        """Helper function to clean up tasks"""
+        for task_id, task in tasks.items():
+            if not task.done():
+                task.cancel()
+                try:
+                    loop.run_until_complete(task)
+                except (asyncio.CancelledError, Exception):
+                    pass
+        tasks.clear()
+
+    # Clean up before test
+    cleanup_tasks()
 
     yield
 
     # Clean up after test
-    for task_id, task in tasks.items():
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-    tasks.clear()
+    cleanup_tasks()
+    loop.close()
 
-# Let pytest-asyncio handle the event loop
 @pytest.fixture(scope="session")
 def event_loop():
     """Create and provide a new event loop for each test session."""
-    loop = asyncio.new_event_loop()
+    policy = asyncio.get_event_loop_policy()
+    loop = policy.new_event_loop()
     yield loop
     loop.close()
