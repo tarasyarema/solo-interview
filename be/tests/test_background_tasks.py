@@ -1,13 +1,11 @@
+import pytest
 import asyncio
 from unittest.mock import patch
-import pytest
-from fastapi import HTTPException
 import json
-
 from main import tasks, insert_task, app
 
 @pytest.mark.asyncio
-async def test_task_creation_and_cleanup(test_client, test_db, clean_tasks):
+async def test_task_creation_and_cleanup(test_client, test_db, event_loop):
     """Test that tasks are properly created and cleaned up"""
     batch_id = "test_batch_creation"
 
@@ -20,15 +18,16 @@ async def test_task_creation_and_cleanup(test_client, test_db, clean_tasks):
     assert not tasks[batch_id].done()
 
     # Clean up
-    tasks[batch_id].cancel()
+    task = tasks[batch_id]
+    task.cancel()
     try:
-        await asyncio.wait_for(tasks[batch_id], timeout=0.5)
-    except (asyncio.CancelledError, asyncio.TimeoutError):
+        await task
+    except asyncio.CancelledError:
         pass
-    assert tasks[batch_id].cancelled()
+    assert task.cancelled()
 
 @pytest.mark.asyncio
-async def test_task_management(test_client, test_db, clean_tasks):
+async def test_task_management(test_client, test_db, event_loop):
     """Test task management functionality"""
     # Clear any existing tasks
     tasks.clear()
@@ -48,16 +47,17 @@ async def test_task_management(test_client, test_db, clean_tasks):
 
     # Clean up tasks
     for batch_id in batch_ids:
-        tasks[batch_id].cancel()
+        task = tasks[batch_id]
+        task.cancel()
         try:
-            await asyncio.wait_for(tasks[batch_id], timeout=0.5)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
+            await task
+        except asyncio.CancelledError:
             pass
-        assert tasks[batch_id].cancelled()
+        assert task.cancelled()
 
 @pytest.mark.asyncio
 @patch('random.randint')
-async def test_insert_task_data_generation(mock_randint, test_db, clean_tasks):
+async def test_insert_task_data_generation(mock_randint, test_db, event_loop):
     """Test that insert_task generates data correctly with mocked random values"""
     mock_randint.return_value = 42
     batch_id = "test_batch_insert"
@@ -72,9 +72,10 @@ async def test_insert_task_data_generation(mock_randint, test_db, clean_tasks):
     # Cancel the task
     task.cancel()
     try:
-        await asyncio.wait_for(task, timeout=0.5)
-    except (asyncio.CancelledError, asyncio.TimeoutError):
+        await task
+    except asyncio.CancelledError:
         pass
+
 
     # Verify data was inserted with our mocked value
     result = test_db.execute(
@@ -86,7 +87,7 @@ async def test_insert_task_data_generation(mock_randint, test_db, clean_tasks):
     assert '"key": 42' in result[0]
 
 @pytest.mark.asyncio
-async def test_task_cleanup_on_error(test_client, test_db, clean_tasks):
+async def test_task_cleanup_on_error(test_client, test_db, event_loop):
     """Test that tasks are properly cleaned up when errors occur"""
     batch_id = "test_batch_error"
 
@@ -102,7 +103,7 @@ async def test_task_cleanup_on_error(test_client, test_db, clean_tasks):
         assert batch_id not in tasks or tasks[batch_id].done()
 
 @pytest.mark.asyncio
-async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
+async def test_duplicate_task_creation(test_client, test_db, event_loop):
     """Test that creating a duplicate task is handled properly"""
     batch_id = "test_batch_duplicate"
 

@@ -8,11 +8,12 @@ async def test_data_insertion(test_db, clean_tasks):
     """Test basic data insertion functionality"""
     batch_id = "test_batch_db"
     test_data = json.dumps({"value": 42})
+    current_time = datetime.now()
 
     # Insert test data
     test_db.execute(
-        'INSERT INTO data (batch_id, id, data) VALUES (?, ?, ?)',
-        (batch_id, datetime.now().isoformat(), test_data)
+        'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
+        (batch_id, test_data, current_time)
     )
 
     # Verify data was inserted
@@ -24,18 +25,18 @@ async def test_data_retrieval(test_db, clean_tasks):
     """Test data retrieval functionality"""
     batch_id = "test_batch_retrieve"
     test_data = json.dumps({"value": 100})
-    test_id = datetime.now().isoformat()
+    current_time = datetime.now()
 
     # Insert test data
     test_db.execute(
-        'INSERT INTO data (batch_id, id, data) VALUES (?, ?, ?)',
-        (batch_id, test_id, test_data)
+        'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
+        (batch_id, test_data, current_time)
     )
 
     # Retrieve and verify data
     result = test_db.execute(
-        'SELECT data FROM data WHERE batch_id = ? AND id = ?',
-        [batch_id, test_id]
+        'SELECT data FROM data WHERE batch_id = ?',
+        [batch_id]
     ).fetchone()
 
     assert result is not None
@@ -48,12 +49,12 @@ async def test_data_aggregation(test_db, clean_tasks):
     now = datetime.now()
 
     # Insert test data with timestamps in the last minute
-    for i, seconds in enumerate([10, 20, 30, 40, 50]):
-        timestamp = (now - timedelta(seconds=seconds)).isoformat()
+    for i in range(5):
         test_data = json.dumps({"value": i * 10})
+        timestamp = now - timedelta(seconds=i * 10)
         test_db.execute(
-            'INSERT INTO data (batch_id, id, data) VALUES (?, ?, ?)',
-            (batch_id, timestamp, test_data)
+            'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
+            (batch_id, test_data, timestamp)
         )
 
     # Verify data count
@@ -65,23 +66,25 @@ async def test_data_aggregation(test_db, clean_tasks):
 
     # Verify data ordering
     results = test_db.execute(
-        'SELECT data FROM data WHERE batch_id = ? ORDER BY id DESC',
+        'SELECT data FROM data WHERE batch_id = ? ORDER BY timestamp DESC',
         [batch_id]
     ).fetchall()
     assert len(results) == 5
     for i, row in enumerate(results):
         data = json.loads(row[0])
         assert "value" in data
+        assert data["value"] == (4 - i) * 10  # Values should be in reverse order
 
 @pytest.mark.asyncio
 async def test_data_cleanup(test_db, clean_tasks):
     """Test data cleanup functionality"""
     batch_id = "test_batch_cleanup"
+    current_time = datetime.now()
 
     # Insert some test data
     test_db.execute(
-        'INSERT INTO data (batch_id, id, data) VALUES (?, ?, ?)',
-        (batch_id, datetime.now().isoformat(), json.dumps({"value": 1}))
+        'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
+        (batch_id, json.dumps({"value": 1}), current_time)
     )
 
     # Verify data exists
@@ -105,12 +108,13 @@ async def test_data_cleanup(test_db, clean_tasks):
 async def test_concurrent_batch_isolation(test_db, clean_tasks):
     """Test that data from different batches is properly isolated"""
     batch_ids = ["batch_1", "batch_2"]
+    current_time = datetime.now()
 
     # Insert data for different batches
     for batch_id in batch_ids:
         test_db.execute(
-            'INSERT INTO data (batch_id, id, data) VALUES (?, ?, ?)',
-            (batch_id, datetime.now().isoformat(), json.dumps({"value": 42}))
+            'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
+            (batch_id, json.dumps({"value": 42}), current_time)
         )
 
     # Verify each batch has correct data
