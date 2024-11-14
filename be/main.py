@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 from contextlib import asynccontextmanager
 import aiosqlite
@@ -114,8 +114,8 @@ async def insert_task(batch_id: str):
     if not hasattr(app.state, 'db'):
         raise RuntimeError("Database not initialized")
 
-    # Use descending values for testing: 40, 30, 20, 10
-    values = [(i, batch_id, datetime.now(), (4 - i) * 10) for i in range(4)]
+    # Use descending values for testing: 40, 30, 20, 10, 0
+    values = [(i + 1, batch_id, datetime.now() - timedelta(seconds=i), (4 - i) * 10) for i in range(5)]
 
     try:
         # Let aiosqlite handle the transaction
@@ -127,9 +127,9 @@ async def insert_task(batch_id: str):
                 )
             await app.state.db.commit()
 
-        # Add a delay to prevent tasks from completing too quickly
-        # This helps with concurrent task limit testing
-        await asyncio.sleep(2.0)
+        # Add a shorter delay to prevent tasks from completing too quickly
+        # This helps with concurrent task limit testing without causing timeouts
+        await asyncio.sleep(0.1)
 
         return True
     except Exception as e:
