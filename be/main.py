@@ -114,8 +114,8 @@ async def insert_task(batch_id: str):
     if not hasattr(app.state, 'db'):
         raise RuntimeError("Database not initialized")
 
-    # Use incremental values for testing: 10, 20, 30, 40
-    values = [(i, batch_id, datetime.now(), i * 10) for i in range(1, 5)]
+    # Use descending values for testing: 40, 30, 20, 10
+    values = [(i, batch_id, datetime.now(), (4 - i) * 10) for i in range(4)]
 
     try:
         # Let aiosqlite handle the transaction
