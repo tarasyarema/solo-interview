@@ -14,7 +14,7 @@ import asyncio
 
 db: duckdb.DuckDBPyConnection
 tasks: dict[str, asyncio.Task] = {}
-
+MAX_TASKS = 5
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -55,7 +55,9 @@ async def root():
 
 @app.get("/tasks")
 async def get_tasks():
-    return HTTPException(status_code=501, detail="Not implemented")
+    return {
+        "tasks": list(tasks.keys()),
+    }
 
 
 async def insert_task(batch_id: str):
@@ -74,6 +76,12 @@ async def insert_task(batch_id: str):
 
 @app.post("/stream/{batch_id}")
 async def start(batch_id: str):
+    if batch_id in tasks:
+        raise HTTPException(status_code=400, detail="batch_id already exists")
+    
+    if (len(tasks) >= MAX_TASKS):
+        raise HTTPException(status_code=400, detail="Maximum number of tasks reached")
+    
     tasks[batch_id] = asyncio.create_task(insert_task(batch_id))
 
     return {
@@ -83,8 +91,24 @@ async def start(batch_id: str):
 
 @app.delete("/stream/{batch_id}")
 async def data_stop(batch_id: str):
-    # Not implemented
-    raise HTTPException(status_code=501, detail="Not implemented")
+    # https://superfastpython.com/asyncio-task-cancellation-best-practices/
+    if batch_id not in tasks:
+        raise HTTPException(status_code=404, detail="batch_id not found")
+        
+    task = tasks[batch_id]
+    if task.done():
+        raise HTTPException(status_code=400, detail="Task already stopped")
+    
+    try:
+        task.cancel()
+        await asyncio.wait([task])
+        del tasks[batch_id]
+        return {
+            "message": "Batch stopped",
+            "batch_id": batch_id,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/stream/{batch_id}")
