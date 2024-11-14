@@ -29,8 +29,8 @@ class AsyncDuckDBConnection:
         if not self.connection.is_closed():
             self.connection.close()
 
-@pytest.fixture(scope="function")
-async def test_db():
+@pytest.fixture
+def test_db():
     """Create a fresh test database for each test."""
     # Store the original database connection
     original_db = app.state.db if hasattr(app.state, 'db') else None
@@ -57,6 +57,8 @@ async def test_db():
     test_conn.close()
     if original_db is not None:
         app.state.db = original_db
+    else:
+        delattr(app.state, 'db')
 
 @pytest.fixture(autouse=True)
 async def clean_tasks(event_loop):

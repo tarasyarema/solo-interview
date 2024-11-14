@@ -21,11 +21,12 @@ async def lifespan(app: FastAPI):
     db = duckdb.connect('data.db')
     db.execute('''
         CREATE TABLE IF NOT EXISTS data (
-            batch_id TEXT,
-            id TEXT,
-            data TEXT
+            id BIGINT,
+            batch_id VARCHAR,
+            data VARCHAR,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE INDEX IF NOT EXISTS idx_data_id ON data (batch_id);
+        CREATE INDEX IF NOT EXISTS idx_data_batch_id ON data (batch_id);
     ''')
 
     # Store database connection in app state
@@ -80,8 +81,8 @@ async def insert_task(batch_id: str):
 
             print(f"Inserting data for batch {batch_id}")
             app.state.db.execute(
-                'INSERT INTO data VALUES (?, ?, ?)',
-                (batch_id, datetime.now().isoformat(), dumps({"key": value}))
+                'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
+                (batch_id, dumps({"key": value}), datetime.now())
             )
     except asyncio.CancelledError:
         print(f"Task {batch_id} was cancelled")
