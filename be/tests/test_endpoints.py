@@ -148,7 +148,7 @@ async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
         assert response.status_code == 429
         data = response.json()
         assert data["status"] == "error"
-        assert "Maximum number of concurrent tasks reached" in data["detail"]
+        assert f"Maximum number of concurrent tasks reached (limit: {MAX_CONCURRENT_TASKS})" == data["detail"]
 
     finally:
         # Clean up all tasks

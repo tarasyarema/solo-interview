@@ -134,8 +134,12 @@ async def test_task_cleanup_on_error(test_client, test_db, clean_tasks):
         assert data["status"] == "error"
         assert "Test error" in data["detail"]
 
-    # Verify task was cleaned up
-    assert not hasattr(app.state, 'tasks') or batch_id not in app.state.tasks
+    # In testing mode, task should be preserved and marked as failed
+    assert batch_id in app.state.tasks
+    task = app.state.tasks[batch_id]
+    assert task.done()
+    assert task.exception() is not None
+    assert str(task.exception()) == "Test error"
 
 @pytest.mark.asyncio
 async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
@@ -202,7 +206,7 @@ async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
     assert response.status_code == 429
     data = response.json()
     assert data["status"] == "error"
-    assert "Maximum number of concurrent tasks" in data["detail"]
+    assert f"Maximum number of concurrent tasks reached (limit: {MAX_CONCURRENT_TASKS})" == data["detail"]
 
     # Wait for all tasks to complete
     for _ in range(50):  # 5 seconds total timeout

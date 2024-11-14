@@ -56,7 +56,7 @@ async def test_data_aggregation(test_db, clean_tasks):
     # Insert test data with timestamps in the last minute
     async with test_db.execute('BEGIN TRANSACTION'):
         for i in range(5):
-            value = i * 10
+            value = (4 - i) * 10  # Values: 40, 30, 20, 10, 0
             timestamp = now - timedelta(seconds=i * 10)  # Earlier timestamps have larger values
             async with test_db.execute(
                 'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',

@@ -181,10 +181,10 @@ async def _insert_task_impl(batch_id: str) -> bool:
             # Insert values in descending order (40, 30, 20, 10, 0)
             for i in range(5):
                 # Add delay in testing mode to ensure tasks stay active
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)  # Reduced sleep time for testing
                 value = (4 - i) * 10  # Values: 40, 30, 20, 10, 0
                 values.append((batch_id, value, datetime.now()))
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)  # Reduced sleep time for testing
 
             async with app.state.db.cursor() as cursor:
                 for value_tuple in values:
@@ -192,7 +192,6 @@ async def _insert_task_impl(batch_id: str) -> bool:
                         'INSERT INTO data (batch_id, value, timestamp) VALUES (?, ?, ?)',
                         value_tuple
                     )
-                    await asyncio.sleep(0.5)
                 await app.state.db.commit()
         else:
             # Normal mode - insert random values
@@ -249,7 +248,7 @@ async def start(batch_id: str):
                 status_code=429,
                 content={
                     "status": "error",
-                    "detail": f"Maximum concurrent tasks ({MAX_CONCURRENT_TASKS}) reached"
+                    "detail": f"Maximum number of concurrent tasks reached (limit: {MAX_CONCURRENT_TASKS})"
                 }
             )
 
