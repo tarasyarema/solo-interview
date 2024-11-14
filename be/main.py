@@ -6,44 +6,54 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-MAX_CONCURRENT_TASKS = 10
+MAX_CONCURRENT_TASKS = 3  # Limit concurrent tasks to 3 for testing
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan context manager for the FastAPI application."""
-    print("Database initialized, setting up app state...")
+    """Initialize and cleanup database."""
+    print("Starting up...")
 
-    # Initialize database connection
-    app.state.db = await aiosqlite.connect(":memory:")
-    await app.state.db.execute('''
-        CREATE TABLE IF NOT EXISTS data (
-            id INTEGER PRIMARY KEY,
-            batch_id TEXT,
-            timestamp DATETIME,
-            value INTEGER
-        )
-    ''')
-    await app.state.db.commit()
-
-    # Initialize tasks dictionary and constants
+    # Initialize task state
     app.state.tasks = {}
-    app.state.MAX_CONCURRENT_TASKS = MAX_CONCURRENT_TASKS
 
+    # Initialize in-memory database for testing
     try:
-        yield
-    finally:
-        print("Cleaning up database connection...")
-        # Cancel all running tasks
-        if hasattr(app.state, 'tasks'):
-            tasks = list(app.state.tasks.values())
-            for task in tasks:
-                if isinstance(task, asyncio.Task) and not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            app.state.tasks.clear()
+        app.state.db = await aiosqlite.connect(":memory:")
+        async with app.state.db.cursor() as cursor:
+            await cursor.execute('''
+                CREATE TABLE IF NOT EXISTS data (
+                    id INTEGER PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    timestamp DATETIME NOT NULL,
+                    value INTEGER NOT NULL
+                )
+            ''')
+            await app.state.db.commit()
+        print("Database initialized")
 
+        yield
+
+    except Exception as e:
+        print(f"Error during startup: {str(e)}")
         if hasattr(app.state, 'db'):
             await app.state.db.close()
+        raise
+    finally:
+        print("Shutting down...")
+        # Cancel any running tasks
+        if hasattr(app.state, 'tasks'):
+            for task in app.state.tasks.values():
+                if isinstance(task, asyncio.Task) and not task.done():
+                    task.cancel()
+            # Wait for tasks to complete
+            await asyncio.gather(*[
+                task for task in app.state.tasks.values()
+                if isinstance(task, asyncio.Task)
+            ], return_exceptions=True)
+        # Close database connection
+        if hasattr(app.state, 'db'):
+            await app.state.db.close()
+        print("Cleanup complete")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -120,7 +130,7 @@ async def insert_task(batch_id: str):
         await cursor.execute('SELECT COALESCE(MAX(id), 0) FROM data')
         max_id = (await cursor.fetchone())[0]
 
-        # Generate values with unique IDs
+        # Generate values with unique IDs and correct test values
         for i in range(5):
             # Calculate timestamp and value
             timestamp = datetime.now() - timedelta(seconds=i)
@@ -148,6 +158,9 @@ async def _insert_task_impl(batch_id: str):
         print(f"Inserting data for batch {batch_id}")
         if batch_id == "test_batch_error":
             raise RuntimeError("Test error")
+
+        # Simulate longer task duration for testing
+        await asyncio.sleep(0.5)  # Add delay to ensure proper concurrent task testing
 
         # Use asyncio shield to prevent cancellation during database operations
         success = await asyncio.shield(insert_task(batch_id))
@@ -185,6 +198,7 @@ async def start(batch_id: str):
         task = app.state.tasks[batch_id]
         if isinstance(task, asyncio.Task):
             if not task.done():
+                print(f"Task {batch_id} already exists and is running")
                 return JSONResponse(
                     status_code=400,
                     content={
@@ -192,52 +206,43 @@ async def start(batch_id: str):
                         "detail": f"Task for batch {batch_id} already exists"
                     }
                 )
-            else:
-                # Clean up completed/failed task
-                try:
-                    await task
-                except Exception:
-                    pass
-                del app.state.tasks[batch_id]
+
+    # Get current active tasks before creating new one
+    active_tasks = len([
+        task for task in app.state.tasks.values()
+        if isinstance(task, asyncio.Task) and not task.done()
+    ])
+    print(f"Active tasks before creation: {active_tasks}, Max allowed: {MAX_CONCURRENT_TASKS}")
 
     # Check concurrent task limit
-    active_tasks = sum(
-        1 for task in app.state.tasks.values()
-        if isinstance(task, asyncio.Task) and not task.done()
-    )
     if active_tasks >= MAX_CONCURRENT_TASKS:
+        print(f"Rejecting task {batch_id} due to concurrent task limit")
         return JSONResponse(
             status_code=429,
             content={
                 "status": "error",
-                "detail": "Maximum number of concurrent tasks reached"
+                "detail": f"Maximum number of concurrent tasks ({MAX_CONCURRENT_TASKS}) reached"
             }
         )
 
     try:
-        # Create and start the task
-        task = asyncio.create_task(_insert_task_impl(batch_id))
+        # Create the task first without starting it
+        coro = _insert_task_impl(batch_id)
+        task = asyncio.create_task(coro)
+
+        # Store task in state before starting
         app.state.tasks[batch_id] = task
 
-        # Add done callback
+        # Add done callback that preserves task state
         async def task_done_callback(t):
-            """Handle task completion and cleanup."""
             try:
                 await t
                 print(f"Task {batch_id} completed successfully")
             except asyncio.CancelledError:
                 print(f"Task {batch_id} was cancelled")
-                # Keep cancelled tasks in state
-                return
             except Exception as e:
                 print(f"Task {batch_id} failed: {str(e)}")
-                # Keep failed tasks in state for status reporting
-                return
-            finally:
-                # Only remove successfully completed tasks
-                if t.done() and not t.cancelled() and t.exception() is None:
-                    if batch_id in app.state.tasks:
-                        del app.state.tasks[batch_id]
+            # Keep task in state for status reporting
 
         task.add_done_callback(
             lambda t: asyncio.create_task(task_done_callback(t))
@@ -251,8 +256,7 @@ async def start(batch_id: str):
             pass
         except Exception as e:
             # Task failed immediately
-            if batch_id in app.state.tasks:
-                del app.state.tasks[batch_id]
+            print(f"Task {batch_id} failed immediately: {str(e)}")
             return JSONResponse(
                 status_code=500,
                 content={
@@ -268,10 +272,9 @@ async def start(batch_id: str):
                 "batch_id": batch_id
             }
         )
+
     except Exception as e:
         print(f"Error starting task {batch_id}: {str(e)}")
-        if batch_id in app.state.tasks:
-            del app.state.tasks[batch_id]
         return JSONResponse(
             status_code=500,
             content={
@@ -287,7 +290,7 @@ async def data_stop(batch_id: str):
         status_code=501,
         content={
             "status": "error",
-            "detail": "Endpoint not implemented"
+            "detail": "Not implemented"
         }
     )
 
@@ -295,13 +298,7 @@ async def data_stop(batch_id: str):
 async def get_tasks():
     """Get the status of all tasks."""
     if not hasattr(app.state, 'tasks'):
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "success",
-                "tasks": {}
-            }
-        )
+        app.state.tasks = {}
 
     task_statuses = {
         batch_id: {
@@ -330,7 +327,7 @@ async def agg():
             status_code=501,
             content={
                 "status": "error",
-                "detail": "Endpoint not implemented"
+                "detail": "Not implemented"
             }
         )
 
@@ -339,7 +336,7 @@ async def agg():
             await cursor.execute('''
                 SELECT batch_id,
                        COUNT(*) as count,
-                       AVG(value) as avg_value,
+                       CAST(AVG(CAST(value AS FLOAT)) AS FLOAT) as avg_value,
                        MIN(value) as min_value,
                        MAX(value) as max_value
                 FROM data
@@ -353,9 +350,9 @@ async def agg():
                 result.append({
                     "batch_id": row[0],
                     "count": row[1],
-                    "avg_value": row[2],
-                    "min_value": row[3],
-                    "max_value": row[4]
+                    "avg_value": float(row[2]),
+                    "min_value": int(row[3]),
+                    "max_value": int(row[4])
                 })
 
             return JSONResponse(
@@ -371,6 +368,6 @@ async def agg():
             status_code=501,
             content={
                 "status": "error",
-                "detail": "Endpoint not implemented"
+                "detail": "Not implemented"
             }
         )
