@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
             CREATE TABLE IF NOT EXISTS data (
                 id INTEGER,
                 batch_id VARCHAR,
-                timestamp TIMESTAMP,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 value INTEGER
             )
         ''')
@@ -74,11 +74,6 @@ async def root():
     }
 
 
-@app.get("/tasks")
-async def get_tasks():
-    raise HTTPException(status_code=501, detail="Not implemented")
-
-
 async def insert_task(batch_id: str):
     """Insert random data for a batch."""
     print(f"Starting task for batch {batch_id}")
@@ -115,10 +110,10 @@ async def insert_task(batch_id: str):
             )
             await asyncio.sleep(0.5)
 
+        return True  # Indicate successful completion
+
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
-        if batch_id in app.state.tasks:
-            app.state.tasks[batch_id].set_exception(e)
         raise e
     finally:
         print(f"Task {batch_id} completed")
@@ -134,14 +129,19 @@ async def start(batch_id: str):
         app.state.tasks = {}
 
     # Check if task already exists and is not done
-    if batch_id in app.state.tasks and not app.state.tasks[batch_id].done():
-        return JSONResponse(
-            status_code=400,
-            content={
-                "status": "error",
-                "detail": f"Task for batch {batch_id} already exists"
-            }
-        )
+    if batch_id in app.state.tasks:
+        task = app.state.tasks[batch_id]
+        if not task.done():
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "detail": f"Task for batch {batch_id} already exists"
+                }
+            )
+        else:
+            # Clean up completed task
+            del app.state.tasks[batch_id]
 
     # Check concurrent task limit
     active_tasks = len([t for t in app.state.tasks.values() if not t.done()])
@@ -167,8 +167,10 @@ async def start(batch_id: str):
                 print(f"Task {batch_id} was cancelled")
             except Exception as e:
                 print(f"Task {batch_id} failed: {str(e)}")
+                # Don't remove task from state on error, let it stay with error status
             finally:
-                if batch_id in app.state.tasks:
+                # Only remove task if it completed successfully
+                if batch_id in app.state.tasks and task.done() and not task.exception():
                     del app.state.tasks[batch_id]
 
         asyncio.create_task(cleanup_task())
@@ -196,9 +198,20 @@ async def start(batch_id: str):
 @app.delete("/stream/{batch_id}")
 async def data_stop(batch_id: str):
     """Stop a streaming task."""
+    if batch_id not in app.state.tasks:
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "detail": f"Task {batch_id} not found"}
+        )
+
+    task = app.state.tasks[batch_id]
+    if not task.done():
+        task.cancel()
+        await task
+
     return JSONResponse(
-        status_code=501,
-        content={"status": "error", "detail": "Not implemented"}
+        status_code=200,
+        content={"status": "success", "detail": f"Task {batch_id} stopped"}
     )
 
 
@@ -215,7 +228,7 @@ async def get_tasks():
             if task.exception() is not None:
                 task_status[batch_id] = False
             else:
-                task_status[batch_id] = task.result() if task.done() else True
+                task_status[batch_id] = True
         else:
             task_status[batch_id] = True
 
