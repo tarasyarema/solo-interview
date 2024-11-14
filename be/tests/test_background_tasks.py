@@ -20,12 +20,18 @@ async def test_task_creation_and_cleanup(test_client, test_db, clean_tasks):
 
     # Clean up
     tasks[batch_id].cancel()
-    await asyncio.sleep(0.1)  # Allow task to cancel
+    try:
+        await tasks[batch_id]
+    except asyncio.CancelledError:
+        pass
     assert tasks[batch_id].cancelled()
 
 @pytest.mark.asyncio
 async def test_task_management(test_client, test_db, clean_tasks):
     """Test task management functionality"""
+    # Clear any existing tasks
+    tasks.clear()
+
     batch_ids = [f"test_batch_{i}" for i in range(3)]
 
     # Create multiple tasks
@@ -39,6 +45,14 @@ async def test_task_management(test_client, test_db, clean_tasks):
     for batch_id in batch_ids:
         assert not tasks[batch_id].done()
 
+    # Clean up tasks
+    for batch_id in batch_ids:
+        tasks[batch_id].cancel()
+        try:
+            await tasks[batch_id]
+        except asyncio.CancelledError:
+            pass
+
 @pytest.mark.asyncio
 @patch('random.randint')
 async def test_insert_task_data_generation(mock_randint, test_db, clean_tasks):
@@ -51,7 +65,7 @@ async def test_insert_task_data_generation(mock_randint, test_db, clean_tasks):
     tasks[batch_id] = task
 
     # Allow some data to be generated
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)
 
     # Cancel the task
     task.cancel()

@@ -12,19 +12,29 @@ import asyncio
 
 
 MAX_CONCURRENT_TASKS = 5
-db: duckdb.DuckDBPyConnection
 tasks: dict[str, asyncio.Task] = {}
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    global db
+async def lifespan(app: FastAPI):
+    # Create and configure database
     db = duckdb.connect('data.db')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS data (
+            batch_id TEXT,
+            id TEXT,
+            data TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_data_id ON data (batch_id);
+    ''')
 
-    db.execute('CREATE TABLE IF NOT EXISTS data (batch_id TEXT, id TEXT, data TEXT); CREATE INDEX IF NOT EXISTS idx_data_id ON data (batch_id);')
+    # Store database connection in app state
+    app.state.db = db
 
     yield
-    db.close()
+
+    # Cleanup
+    app.state.db.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -40,7 +50,7 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    count = db.execute('SELECT COUNT(*) FROM data').fetchone()
+    count = app.state.db.execute('SELECT COUNT(*) FROM data').fetchone()
 
     if count:
         count = count[0]
@@ -69,7 +79,10 @@ async def insert_task(batch_id: str):
             print(f"{batch_id}: {id} - it: {i}")
             value = random.randint(0, 100)
 
-            db.execute('INSERT INTO data VALUES (?, ?, ?)', (batch_id, id, dumps({"key": value})))
+            app.state.db.execute(
+                'INSERT INTO data VALUES (?, ?, ?)',
+                (batch_id, id, dumps({"key": value}))
+            )
             i += 1
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")

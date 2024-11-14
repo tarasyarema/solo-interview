@@ -1,6 +1,7 @@
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import asyncio
 
 @pytest.mark.asyncio
 async def test_root_endpoint(test_client, test_db):
@@ -24,16 +25,22 @@ async def test_create_stream_task(test_client, test_db, clean_tasks):
     assert data["batch_id"] == batch_id
 
 @pytest.mark.asyncio
-async def test_stream_endpoint(async_client, test_db, clean_tasks):
+async def test_stream_endpoint(test_client, test_db, clean_tasks):
     """Test the streaming endpoint returns SSE data"""
     batch_id = "test_batch_2"
-    async with async_client.stream("GET", f"/stream/{batch_id}") as response:
+
+    # First create the task
+    response = test_client.post(f"/stream/{batch_id}")
+    assert response.status_code == 200
+
+    # Now test the stream
+    with test_client.get(f"/stream/{batch_id}", stream=True) as response:
         assert response.status_code == 200
         assert response.headers["content-type"] == "text/event-stream"
-        # Read first few events to verify format
-        async for line in response.aiter_lines():
-            if line.startswith("data: "):
-                data_line = line.removeprefix("data: ")
+        # Read first event to verify format
+        for line in response.iter_lines():
+            if line.startswith(b"data: "):
+                data_line = line.decode().removeprefix("data: ")
                 assert "value" in data_line
                 break
 

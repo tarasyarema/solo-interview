@@ -1,5 +1,6 @@
 import json
 import pytest
+import asyncio
 from datetime import datetime, timedelta
 
 @pytest.mark.asyncio
@@ -9,6 +10,7 @@ async def test_data_insertion(test_db, clean_tasks):
     test_data = json.dumps({"key": 42})
 
     # Insert test data
+    await asyncio.sleep(0.1)  # Allow any pending transactions to complete
     test_db.execute(
         'INSERT INTO data (batch_id, id, data) VALUES (?, ?, ?)',
         [batch_id, datetime.now().isoformat(), test_data]
@@ -30,6 +32,7 @@ async def test_data_retrieval(test_db, clean_tasks):
     test_id = datetime.now().isoformat()
 
     # Insert test data
+    await asyncio.sleep(0.1)  # Allow any pending transactions to complete
     test_db.execute(
         'INSERT INTO data (batch_id, id, data) VALUES (?, ?, ?)',
         [batch_id, test_id, test_data]
@@ -52,6 +55,7 @@ async def test_data_aggregation(test_db, clean_tasks):
     now = datetime.now()
 
     # Insert test data with timestamps in the last minute
+    await asyncio.sleep(0.1)  # Allow any pending transactions to complete
     for i, seconds in enumerate([10, 20, 30, 40, 50]):
         timestamp = (now - timedelta(seconds=seconds)).isoformat()
         test_data = json.dumps({"key": i * 10})
@@ -102,6 +106,7 @@ async def test_data_cleanup(test_db, clean_tasks):
     batch_id = "test_batch_cleanup"
 
     # Insert some test data
+    await asyncio.sleep(0.1)  # Allow any pending transactions to complete
     test_db.execute(
         'INSERT INTO data (batch_id, id, data) VALUES (?, ?, ?)',
         [batch_id, datetime.now().isoformat(), json.dumps({"key": 1})]
@@ -130,6 +135,7 @@ async def test_concurrent_batch_isolation(test_db, clean_tasks):
     batch_ids = ["batch_1", "batch_2"]
 
     # Insert data for different batches
+    await asyncio.sleep(0.1)  # Allow any pending transactions to complete
     for batch_id in batch_ids:
         test_db.execute(
             'INSERT INTO data (batch_id, id, data) VALUES (?, ?, ?)',
