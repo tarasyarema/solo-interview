@@ -84,13 +84,16 @@ async def test_db(setup_app):
 
     except Exception as e:
         print(f"Error setting up database: {str(e)}")
-        if db and not db.closed:
-            await db.close()
+        if db:
+            try:
+                await db.close()
+            except Exception:
+                pass
         raise
 
     finally:
         # Clean up database connection
-        if db and not db.closed:
+        if db:
             try:
                 await db.close()
             except Exception as e:
