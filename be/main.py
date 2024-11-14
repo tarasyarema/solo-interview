@@ -138,15 +138,17 @@ async def insert_task(batch_id: str):
         raise
 
 async def _insert_task_impl(batch_id: str):
-    """Protected implementation of insert_task."""
+    """Implementation of the streaming task."""
     try:
+        print(f"Inserting data for batch {batch_id}")
         await insert_task(batch_id)
         return True
     except Exception as e:
-        print(f"Error in insert_task for {batch_id}: {str(e)}")
-        if batch_id in app.state.tasks:
+        print(f"Error in task {batch_id}: {str(e)}")
+        # Make sure the task is removed from app.state.tasks on error
+        if hasattr(app.state, 'tasks') and batch_id in app.state.tasks:
             del app.state.tasks[batch_id]
-        raise
+        raise  # Re-raise the exception to trigger the error response
 
 @app.post("/stream/{batch_id}")
 async def start(batch_id: str):
@@ -168,7 +170,7 @@ async def start(batch_id: str):
     for bid, task in app.state.tasks.items():
         if isinstance(task, asyncio.Task) and task.done():
             try:
-                task.result()
+                task.result()  # This will raise any exception that occurred
             except Exception as e:
                 print(f"Task {bid} failed: {str(e)}")
             tasks_to_remove.append(bid)
@@ -208,13 +210,10 @@ async def start(batch_id: str):
     print(f"Starting stream for batch {batch_id}")
 
     try:
-        task = asyncio.create_task(
-            _insert_task_impl(batch_id),
-            name=f"task_{batch_id}"
-        )
+        # Create and store the task
+        task = asyncio.create_task(_insert_task_impl(batch_id), name=f"task_{batch_id}")
         app.state.tasks[batch_id] = task
 
-        # Use a simpler task done callback that doesn't create new tasks
         def task_done_callback(t):
             try:
                 t.result()  # This will raise any exception that occurred
@@ -246,45 +245,32 @@ async def start(batch_id: str):
             }
         )
 
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "started",
+                "batch_id": batch_id
+            }
+        )
+    except Exception as e:
+        if batch_id in app.state.tasks:
+            del app.state.tasks[batch_id]
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": str(e)
+            }
+        )
+
 @app.delete("/stream/{batch_id}")
 async def data_stop(batch_id: str):
-    """Stop a streaming task."""
-    if not hasattr(app.state, 'tasks'):
-        return JSONResponse(
-            status_code=404,
-            content={
-                "status": "error",
-                "detail": "No tasks found"
-            }
-        )
-
-    task = app.state.tasks.get(batch_id)
-    if task is None:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "status": "error",
-                "detail": f"Task {batch_id} not found"
-            }
-        )
-
-    if isinstance(task, asyncio.Task) and not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            print(f"Error cancelling task {batch_id}: {str(e)}")
-
-    if batch_id in app.state.tasks:
-        del app.state.tasks[batch_id]
-
+    """Stop a streaming task (not implemented)."""
     return JSONResponse(
-        status_code=200,
+        status_code=501,
         content={
-            "status": "success",
-            "detail": f"Task {batch_id} stopped"
+            "status": "error",
+            "detail": "Not implemented"
         }
     )
 
@@ -330,45 +316,11 @@ async def get_tasks():
 
 @app.get("/agg")
 async def agg():
-    """Aggregate data from the database."""
-    if not hasattr(app.state, 'db'):
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "error",
-                "detail": "Database not initialized"
-            }
-        )
-
-    try:
-        async with app.state.db.execute(
-            '''
-            SELECT DISTINCT value
-            FROM data
-            WHERE value IS NOT NULL
-            ORDER BY value DESC
-            '''
-        ) as cursor:
-            rows = await cursor.fetchall()
-
-        values = []
-        if rows:
-            values = [row[0] for row in rows if row[0] is not None]
-            values.sort(reverse=True)
-
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "success",
-                "values": values
-            }
-        )
-    except Exception as e:
-        print(f"Error in agg endpoint: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "error",
-                "detail": str(e)
-            }
-        )
+    """Aggregate data from the database (not implemented)."""
+    return JSONResponse(
+        status_code=501,
+        content={
+            "status": "error",
+            "detail": "Not implemented"
+        }
+    )
