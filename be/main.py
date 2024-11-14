@@ -115,7 +115,7 @@ async def insert_task(batch_id: str):
 async def start(batch_id: str):
     """Start a new streaming task."""
     try:
-        # Check if task already exists
+        # Check if task already exists first
         if batch_id in tasks:
             return JSONResponse(
                 status_code=400,
@@ -139,12 +139,28 @@ async def start(batch_id: str):
         task = asyncio.create_task(insert_task(batch_id))
         tasks[batch_id] = task
 
+        # Wait a moment for the task to start and potentially fail
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+        except asyncio.TimeoutError:
+            # Task is still running, which is good
+            pass
+        except Exception as e:
+            # Task failed to start
+            if batch_id in tasks:
+                del tasks[batch_id]
+            return JSONResponse(
+                status_code=500,
+                content={"detail": str(e)}
+            )
+
         # Set up task cleanup
         def cleanup_task(t):
             try:
-                # Only remove if task is done and batch_id still exists
-                if t.done() and batch_id in tasks:
-                    del tasks[batch_id]
+                if t.done() and t.exception():
+                    print(f"Task {batch_id} failed: {t.exception()}")
+                    if batch_id in tasks:
+                        del tasks[batch_id]
             except Exception as e:
                 print(f"Error cleaning up task {batch_id}: {str(e)}")
 
