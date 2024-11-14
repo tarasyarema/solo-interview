@@ -9,6 +9,7 @@ import * as $batch_id_ from "./routes/batch/[id].tsx";
 import * as $index from "./routes/index.tsx";
 import * as $BatchCreate from "./islands/BatchCreate.tsx";
 import * as $Events from "./islands/Events.tsx";
+import * as $OverallData from "./islands/OverallData.tsx";
 import type { Manifest } from "$fresh/server.ts";
 
 const manifest = {
@@ -22,6 +23,7 @@ const manifest = {
   islands: {
     "./islands/BatchCreate.tsx": $BatchCreate,
     "./islands/Events.tsx": $Events,
+    "./islands/OverallData.tsx": $OverallData,
   },
   baseUrl: import.meta.url,
 } satisfies Manifest;
