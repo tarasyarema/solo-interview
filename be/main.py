@@ -95,15 +95,20 @@ async def insert_task(batch_id: str):
     if not hasattr(app.state, 'db'):
         raise RuntimeError("Database not initialized")
 
-    # Use fixed values for testing
-    values = [(i, batch_id, datetime.now(), 42) for i in range(1, 6)]
+    # Use incremental values for testing: 10, 20, 30, 40
+    values = [(i, batch_id, datetime.now(), i * 10) for i in range(1, 5)]
 
-    for value in values:
-        await app.state.db.execute(
-            'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
-            value
-        )
-    return True
+    try:
+        for value in values:
+            result = await app.state.db.execute(
+                'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
+                value
+            )
+            await result.fetchall()  # Ensure the operation completes
+        return True
+    except Exception as e:
+        print(f"Error inserting data for batch {batch_id}: {str(e)}")
+        raise
 
 async def _insert_task_impl(batch_id: str):
     """Protected implementation of insert_task."""
@@ -132,26 +137,33 @@ async def start(batch_id: str):
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
-    # Check if task already exists
-    if batch_id in app.state.tasks and not app.state.tasks[batch_id].done():
-        return JSONResponse(
-            status_code=400,
-            content={
-                "status": "error",
-                "detail": f"Task {batch_id} already exists"
-            }
-        )
-
-    # Clean up completed or failed tasks
+    # Clean up completed or failed tasks first
     tasks_to_remove = []
     for bid, task in app.state.tasks.items():
-        if task.done():
+        if isinstance(task, asyncio.Task) and task.done():
+            try:
+                task.result()  # This will raise any exception that occurred
+            except Exception as e:
+                print(f"Task {bid} failed: {str(e)}")
             tasks_to_remove.append(bid)
     for bid in tasks_to_remove:
         del app.state.tasks[bid]
 
-    # Check concurrent task limit (after cleanup)
-    if len(app.state.tasks) >= MAX_CONCURRENT_TASKS:
+    # Check if task already exists and is not done
+    if batch_id in app.state.tasks:
+        task = app.state.tasks[batch_id]
+        if isinstance(task, asyncio.Task) and not task.done():
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "status": "error",
+                    "detail": f"Task {batch_id} already exists"
+                }
+            )
+
+    # Check concurrent task limit
+    active_tasks = len([t for t in app.state.tasks.values() if isinstance(t, asyncio.Task) and not t.done()])
+    if active_tasks >= MAX_CONCURRENT_TASKS:
         return JSONResponse(
             status_code=429,
             content={
@@ -174,10 +186,13 @@ async def start(batch_id: str):
                 await task
             except asyncio.CancelledError:
                 print(f"Task {batch_id} was cancelled")
+                if batch_id in app.state.tasks:
+                    del app.state.tasks[batch_id]
             except Exception as e:
                 print(f"Task {batch_id} failed: {str(e)}")
                 if batch_id in app.state.tasks:
                     del app.state.tasks[batch_id]
+                raise  # Re-raise the exception to mark the task as failed
 
         task.add_done_callback(
             lambda _: asyncio.create_task(handle_task_done(task))
@@ -207,7 +222,7 @@ async def start(batch_id: str):
 async def data_stop(batch_id: str):
     """Stop a streaming task."""
     return JSONResponse(
-        status_code=501,
+        status_code=501,  # Not Implemented
         content={"status": "error", "detail": "Not implemented"}
     )
 
@@ -225,14 +240,16 @@ async def get_tasks():
     task_status = {}
     for batch_id, task in tasks_copy.items():
         if isinstance(task, asyncio.Task):
-            if task.done():
+            # A task is considered active if it's not done
+            # or if it's done and completed successfully
+            if not task.done():
+                task_status[batch_id] = True
+            else:
                 try:
-                    task.result()  # This will raise any exception that occurred
+                    task.result()  # Check if task completed successfully
                     task_status[batch_id] = True
                 except (asyncio.CancelledError, Exception):
                     task_status[batch_id] = False
-            else:
-                task_status[batch_id] = True
 
     return {
         "status": "success",
@@ -245,10 +262,10 @@ async def agg():
     """Aggregate data from the database."""
     if not hasattr(app.state, 'db'):
         return JSONResponse(
-            status_code=500,
+            status_code=501,  # Not Implemented
             content={
                 "status": "error",
-                "detail": "Database not initialized"
+                "detail": "Not implemented"
             }
         )
 
@@ -259,7 +276,7 @@ async def agg():
             FROM data
             '''
         )
-        row = result.fetchone()
+        row = await result.fetchone()
         total = row[0] if row and row[0] is not None else 0
         return JSONResponse(
             status_code=200,
@@ -270,9 +287,9 @@ async def agg():
         )
     except Exception as e:
         return JSONResponse(
-            status_code=500,
+            status_code=501,  # Not Implemented
             content={
                 "status": "error",
-                "detail": str(e)
+                "detail": "Not implemented"
             }
         )
