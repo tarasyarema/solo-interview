@@ -87,9 +87,10 @@ async def insert_task(batch_id: str):
         # Continuous insertion
         while True:
             # Check if task is cancelled
-            current_task = asyncio.current_task()
-            if current_task and current_task.cancelled():
+            if asyncio.current_task().cancelled():
                 print(f"Task {batch_id} was cancelled")
+                if batch_id in tasks:
+                    del tasks[batch_id]
                 break
 
             print(f"Inserting data for batch {batch_id}")
@@ -106,7 +107,7 @@ async def insert_task(batch_id: str):
             del tasks[batch_id]
         raise
     finally:
-        # Clean up if task failed before first insertion
+        # Only clean up if task failed before first insertion
         if not inserted and batch_id in tasks:
             del tasks[batch_id]
         print(f"Task {batch_id} completed")
@@ -114,13 +115,20 @@ async def insert_task(batch_id: str):
 
 @app.post("/stream/{batch_id}")
 async def start(batch_id: str):
+    """Start a new streaming task."""
+    # Clean up completed tasks first
+    for task_id, task in list(tasks.items()):
+        if task.done():
+            del tasks[task_id]
+
     if batch_id in tasks:
         return JSONResponse(
             status_code=400,
             content={"detail": f"Task {batch_id} already exists"}
         )
 
-    if len(tasks) >= MAX_CONCURRENT_TASKS:
+    active_tasks = len([t for t in tasks.values() if not t.done()])
+    if active_tasks >= MAX_CONCURRENT_TASKS:
         return JSONResponse(
             status_code=429,
             content={"detail": "Too many concurrent tasks"}
@@ -138,7 +146,8 @@ async def start(batch_id: str):
         if task.done():
             if task.exception():
                 exc = task.exception()
-                del tasks[batch_id]
+                if batch_id in tasks:
+                    del tasks[batch_id]
                 return JSONResponse(
                     status_code=500,
                     content={"detail": str(exc)}
