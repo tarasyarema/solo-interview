@@ -40,11 +40,11 @@ async def test_task_creation_and_cleanup(test_client, test_db, clean_tasks):
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
     data = response.json()
-    assert "message" in data
-    assert f"Started task for batch {batch_id}" in data["message"]
+    assert data["status"] == "started"
+    assert data["batch_id"] == batch_id
 
     # Wait for task to start and insert data
-    await asyncio.sleep(0.5)  # Reduced sleep time to prevent timeouts
+    await asyncio.sleep(0.2)  # Reduced sleep time
 
     # Verify task is running and has inserted data
     result = test_db.execute(
@@ -75,9 +75,9 @@ async def test_task_management(test_client, test_db, clean_tasks):
         response = test_client.post(f"/stream/{batch_id}")
         assert response.status_code == 200
         data = response.json()
-        assert "message" in data
-        assert f"Started task for batch {batch_id}" in data["message"]
-        await asyncio.sleep(0.5)  # Reduced sleep time to prevent timeouts
+        assert data["status"] == "started"
+        assert data["batch_id"] == batch_id
+        await asyncio.sleep(0.2)  # Reduced sleep time
 
     # Verify all tasks are running and have data
     for batch_id in batch_ids:
@@ -113,7 +113,8 @@ async def test_task_cleanup_on_error(test_client, test_db, clean_tasks):
         response = test_client.post(f"/stream/{batch_id}")
         assert response.status_code == 500
         data = response.json()
-        assert "Test error" in data["error"]
+        assert data["status"] == "error"
+        assert "Test error" in data["detail"]
 
     # Verify task was cleaned up
     assert batch_id not in tasks
@@ -133,13 +134,17 @@ async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
     # Create first task
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
-    await asyncio.sleep(0.5)  # Reduced sleep time to prevent timeouts
+    data = response.json()
+    assert data["status"] == "started"
+    assert data["batch_id"] == batch_id
+    await asyncio.sleep(0.2)  # Reduced sleep time
 
     # Attempt to create duplicate task
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 400
     data = response.json()
-    assert f"Task for batch {batch_id} already exists" in data["error"]
+    assert data["status"] == "error"
+    assert "Task for batch test_batch_duplicate already exists" in data["detail"]
 
     # Verify original task is still running
     assert batch_id in tasks
@@ -159,13 +164,17 @@ async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
     for i in range(MAX_CONCURRENT_TASKS):
         response = test_client.post(f"/stream/batch_{i}")
         assert response.status_code == 200
-        await asyncio.sleep(0.5)  # Reduced sleep time to prevent timeouts
+        data = response.json()
+        assert data["status"] == "started"
+        assert data["batch_id"] == f"batch_{i}"
+        await asyncio.sleep(0.2)  # Reduced sleep time
 
     # Attempt to create one more task
     response = test_client.post("/stream/batch_extra")
     assert response.status_code == 429
     data = response.json()
-    assert "Maximum number of concurrent tasks reached" in data["error"]
+    assert data["status"] == "error"
+    assert "Maximum number of concurrent tasks reached" in data["detail"]
 
 @pytest.mark.asyncio
 async def test_unimplemented_endpoints(test_client):
@@ -180,10 +189,12 @@ async def test_unimplemented_endpoints(test_client):
     response = test_client.delete("/stream/test_batch")
     assert response.status_code == 501
     data = response.json()
-    assert "Not implemented" in data["detail"]
+    assert data["status"] == "error"
+    assert data["detail"] == "Not implemented"
 
     # Test agg endpoint
     response = test_client.get("/agg")
     assert response.status_code == 501
     data = response.json()
-    assert "Not implemented" in data["detail"]
+    assert data["status"] == "error"
+    assert data["detail"] == "Not implemented"

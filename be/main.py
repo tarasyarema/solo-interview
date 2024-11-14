@@ -99,16 +99,24 @@ async def insert_task(batch_id: str):
                 await asyncio.sleep(0.1)
             except asyncio.CancelledError:
                 print(f"Task {batch_id} cancelled during execution")
+                if batch_id in tasks:
+                    tasks.pop(batch_id)
                 raise
             except Exception as e:
                 print(f"Error in task {batch_id}: {str(e)}")
+                if batch_id in tasks:
+                    tasks.pop(batch_id)
                 raise
 
     except asyncio.CancelledError:
         print(f"Task {batch_id} cancelled during startup")
+        if batch_id in tasks:
+            tasks.pop(batch_id)
         raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
+        if batch_id in tasks:
+            tasks.pop(batch_id)
         raise
 
 
@@ -124,7 +132,7 @@ async def start(batch_id: str, request: Request):
                     content={"status": "error", "detail": f"Task for batch {batch_id} already exists"}
                 )
             else:
-                # Remove completed/failed task
+                # Remove completed/failed task before creating new one
                 tasks.pop(batch_id)
 
         # Check concurrent task limit
@@ -159,7 +167,7 @@ async def start(batch_id: str, request: Request):
             """Clean up task when client disconnects."""
             try:
                 if batch_id in tasks:
-                    task = tasks.pop(batch_id)
+                    task = tasks[batch_id]
                     if not task.done():
                         task.cancel()
                         try:
@@ -168,10 +176,11 @@ async def start(batch_id: str, request: Request):
                             pass
                         except Exception:
                             pass
+                    tasks.pop(batch_id)
             except Exception as e:
                 print(f"Error cleaning up task {batch_id}: {str(e)}")
 
-        # Store cleanup task in request state
+        # Store cleanup task in request state and start it
         request.state.cleanup_tasks = getattr(request.state, 'cleanup_tasks', [])
         cleanup_coro = cleanup_task()
         request.state.cleanup_tasks.append(cleanup_coro)
