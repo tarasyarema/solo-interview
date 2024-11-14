@@ -74,10 +74,11 @@ async def insert_task(batch_id: str):
     try:
         while True:
             # Check if task is cancelled before sleeping
-            if asyncio.current_task().cancelled():
+            current_task = asyncio.current_task()
+            if current_task and current_task.cancelled():
                 break
 
-            await asyncio.sleep(0.25)
+            # Insert at least one value before potentially being cancelled
             value = random.randint(0, 100)
 
             # Ensure we have access to the database connection
@@ -89,15 +90,21 @@ async def insert_task(batch_id: str):
                 'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
                 (batch_id, dumps({"value": value}), datetime.now())
             )
+
+            # Only sleep after first insert
+            await asyncio.sleep(0.25)
+
     except asyncio.CancelledError:
         print(f"Task {batch_id} was cancelled")
         raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
+        if batch_id in tasks:
+            del tasks[batch_id]
         raise
     finally:
-        # Always clean up task in finally block
-        if batch_id in tasks:
+        # Only remove from tasks dict if this is the current task for this batch_id
+        if batch_id in tasks and tasks[batch_id] == asyncio.current_task():
             del tasks[batch_id]
 
 
@@ -111,24 +118,29 @@ async def start(batch_id: str):
     if len(tasks) >= MAX_CONCURRENT_TASKS:
         raise HTTPException(status_code=400, detail="Maximum number of concurrent tasks reached")
 
-    # Create new task and store it before any potential errors
-    task = asyncio.create_task(insert_task(batch_id))
-    tasks[batch_id] = task
+    try:
+        # Create new task and store it before any potential errors
+        task = asyncio.create_task(insert_task(batch_id))
+        tasks[batch_id] = task
 
-    # Wait a short time to ensure task starts
-    await asyncio.sleep(0.1)
+        # Wait a short time to ensure task starts and inserts at least one value
+        await asyncio.sleep(0.25)
 
-    # Check if task is still running
-    if task.done():
-        # If task failed, remove it and raise the error
-        if task.exception():
+        # Check if task failed immediately
+        if task.done() and task.exception():
+            raise task.exception()
+
+        return {
+            "message": "Batch started",
+            "batch_id": batch_id,
+        }
+    except Exception as e:
+        # Clean up task if it exists
+        if batch_id in tasks:
+            tasks[batch_id].cancel()
             del tasks[batch_id]
-            raise HTTPException(status_code=500, detail=str(task.exception()))
-
-    return {
-        "message": "Batch started",
-        "batch_id": batch_id,
-    }
+        # Re-raise as HTTP exception
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/stream/{batch_id}")
