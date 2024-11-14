@@ -11,28 +11,34 @@ class AsyncDuckDBConnection:
     """Async wrapper for DuckDB connection."""
     def __init__(self, conn):
         self.conn = conn
+        self._closed = False
 
     async def execute(self, query, params=None):
         """Execute a query asynchronously."""
+        if self._closed:
+            raise RuntimeError("Connection is closed")
         try:
             if params is None:
-                return await asyncio.to_thread(self.conn.execute, query)
-            return await asyncio.to_thread(self.conn.execute, query, params)
+                return await asyncio.to_thread(lambda: self.conn.execute(query))
+            return await asyncio.to_thread(lambda: self.conn.execute(query, params))
         except Exception as e:
             print(f"Database error: {str(e)}")
             raise
 
     async def close(self):
         """Close the database connection."""
-        try:
-            if not self.conn.closed():
+        if not self._closed:
+            try:
                 await asyncio.to_thread(self.conn.close)
-        except Exception as e:
-            print(f"Error closing connection: {str(e)}")
-            raise
+                self._closed = True
+            except Exception as e:
+                print(f"Error closing connection: {str(e)}")
+                raise
 
     async def __aenter__(self):
         """Async context manager entry."""
+        if self._closed:
+            raise RuntimeError("Connection is closed")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -85,7 +91,7 @@ async def clean_tasks():
         app.state.tasks.clear()
 
 @pytest.fixture
-async def test_db():
+async def test_db(setup_app):
     """Create a test database connection."""
     # Create a new in-memory database for each test
     conn = duckdb.connect(':memory:')
@@ -97,11 +103,10 @@ async def test_db():
             value INTEGER
         )
     ''')
-    db = AsyncDuckDBConnection(conn)
-    app.state.db = db  # Set the database in app state before yielding
-    try:
-        yield db
-    finally:
-        await db.close()
-        if hasattr(app.state, 'db'):
-            delattr(app.state, 'db')
+    async with AsyncDuckDBConnection(conn) as db:
+        app.state.db = db  # Set the database in app state before yielding
+        try:
+            yield db
+        finally:
+            if hasattr(app.state, 'db'):
+                delattr(app.state, 'db')
