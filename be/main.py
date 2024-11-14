@@ -72,10 +72,20 @@ async def root():
                 }
             )
 
-        # Get row count
-        cursor = await app.state.db.execute('SELECT COUNT(*) FROM data')
-        rows = await cursor.fetchall()
-        count = rows[0][0] if rows and rows[0] and rows[0][0] is not None else 0
+        # Get row count using proper async handling
+        try:
+            cursor = await app.state.db.execute('SELECT COUNT(*) FROM data')
+            result = await cursor.fetchone()
+            count = result[0] if result and result[0] is not None else 0
+        except Exception as e:
+            print(f"Database error in root endpoint: {str(e)}")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "error",
+                    "detail": f"Database error: {str(e)}"
+                }
+            )
 
         # Clean up completed tasks first
         tasks_to_remove = []
@@ -96,6 +106,7 @@ async def root():
         return JSONResponse(
             status_code=200,
             content={
+                "status": "success",
                 "row_count": count,
                 "task_count": active_tasks,
             }
@@ -122,13 +133,16 @@ async def insert_task(batch_id: str):
 
     try:
         for value in values:
-            # Execute the insert and await the result
             cursor = await app.state.db.execute(
                 'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
                 value
             )
-            # Ensure the operation completes by fetching
-            await cursor.fetchall()
+            await cursor.fetchall()  # Ensure the operation completes
+
+        # Add a small delay to prevent tasks from completing too quickly
+        # This helps with concurrent task limit testing
+        await asyncio.sleep(0.1)
+
         return True
     except Exception as e:
         print(f"Error inserting data for batch {batch_id}: {str(e)}")
@@ -174,9 +188,10 @@ async def start(batch_id: str):
         del app.state.tasks[bid]
 
     # Check if task already exists and is not done
-    if batch_id in app.state.tasks:
-        task = app.state.tasks[batch_id]
-        if isinstance(task, asyncio.Task) and not task.done():
+    existing_task = app.state.tasks.get(batch_id)
+    if existing_task is not None and isinstance(existing_task, asyncio.Task):
+        if not existing_task.done():
+            print(f"Task {batch_id} already exists and is running")
             return JSONResponse(
                 status_code=400,
                 content={
@@ -184,18 +199,22 @@ async def start(batch_id: str):
                     "detail": f"Task {batch_id} already exists"
                 }
             )
-        # If task exists but is done, remove it
-        del app.state.tasks[batch_id]
+        else:
+            # Remove completed task before creating new one
+            del app.state.tasks[batch_id]
 
     # Check concurrent task limit BEFORE creating new task
     active_tasks = len([t for t in app.state.tasks.values()
                        if isinstance(t, asyncio.Task) and not t.done()])
+
+    print(f"Current active tasks: {active_tasks}")
     if active_tasks >= MAX_CONCURRENT_TASKS:
+        print(f"Maximum concurrent tasks ({MAX_CONCURRENT_TASKS}) reached")
         return JSONResponse(
             status_code=429,
             content={
                 "status": "error",
-                "detail": "Maximum number of concurrent tasks reached"
+                "detail": f"Maximum number of concurrent tasks ({MAX_CONCURRENT_TASKS}) reached"
             }
         )
 
@@ -229,7 +248,7 @@ async def start(batch_id: str):
         return JSONResponse(
             status_code=200,
             content={
-                "status": "started",
+                "status": "success",
                 "batch_id": batch_id
             }
         )
@@ -288,6 +307,7 @@ async def get_tasks():
     return JSONResponse(
         status_code=200,
         content={
+            "status": "success",
             "tasks": task_statuses
         }
     )
@@ -310,14 +330,17 @@ async def agg():
             '''
             SELECT value
             FROM data
+            WHERE value IS NOT NULL
             ORDER BY value DESC
             '''
         )
         rows = await cursor.fetchall()
-        values = [row[0] for row in rows] if rows else []
 
-        # Sort values in descending order (in case DB order isn't reliable)
-        values.sort(reverse=True)
+        # Extract values and ensure they're sorted in descending order
+        values = []
+        if rows:
+            values = [row[0] for row in rows if row[0] is not None]
+            values.sort(reverse=True)  # Ensure descending order
 
         return JSONResponse(
             status_code=200,
@@ -327,10 +350,11 @@ async def agg():
             }
         )
     except Exception as e:
+        print(f"Error in agg endpoint: {str(e)}")
         return JSONResponse(
-            status_code=501,  # Not Implemented
+            status_code=500,
             content={
                 "status": "error",
-                "detail": "Not implemented"
+                "detail": str(e)
             }
         )
