@@ -71,13 +71,17 @@ async def get_tasks():
 
 async def insert_task(batch_id: str):
     print(f"Starting task for batch {batch_id}")
+    inserted = False
     try:
-        inserted = False
         while True:
             # Check if task is cancelled before sleeping
             current_task = asyncio.current_task()
             if current_task and current_task.cancelled():
-                break
+                # Only break if we've inserted at least one value
+                if inserted:
+                    break
+                # Otherwise, continue to ensure we insert at least once
+                continue
 
             # Insert at least one value before potentially being cancelled
             value = random.randint(0, 100)
@@ -114,8 +118,7 @@ async def insert_task(batch_id: str):
         current_task = asyncio.current_task()
         if (not inserted and
             batch_id in tasks and
-            tasks[batch_id] == current_task and
-            (current_task.done() or current_task.cancelled())):
+            tasks[batch_id] == current_task):
             del tasks[batch_id]
 
 
