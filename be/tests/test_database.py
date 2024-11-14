@@ -1,19 +1,18 @@
 import pytest
 import asyncio
-import json
 from datetime import datetime, timedelta
 
 @pytest.mark.asyncio
 async def test_data_insertion(test_db, clean_tasks):
     """Test basic data insertion functionality"""
     batch_id = "test_batch_db"
-    test_data = json.dumps({"value": 42})
+    value = 42
     current_time = datetime.now()
 
     # Insert test data
     test_db.execute(
-        'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
-        (batch_id, test_data, current_time)
+        'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
+        (1, batch_id, current_time, value)
     )
 
     # Verify data was inserted
@@ -24,23 +23,23 @@ async def test_data_insertion(test_db, clean_tasks):
 async def test_data_retrieval(test_db, clean_tasks):
     """Test data retrieval functionality"""
     batch_id = "test_batch_retrieve"
-    test_data = json.dumps({"value": 100})
+    value = 100
     current_time = datetime.now()
 
     # Insert test data
     test_db.execute(
-        'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
-        (batch_id, test_data, current_time)
+        'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
+        (1, batch_id, current_time, value)
     )
 
     # Retrieve and verify data
     result = test_db.execute(
-        'SELECT data FROM data WHERE batch_id = ?',
+        'SELECT value FROM data WHERE batch_id = ?',
         [batch_id]
     ).fetchone()
 
     assert result is not None
-    assert result[0] == test_data
+    assert result[0] == value
 
 @pytest.mark.asyncio
 async def test_data_aggregation(test_db, clean_tasks):
@@ -50,11 +49,11 @@ async def test_data_aggregation(test_db, clean_tasks):
 
     # Insert test data with timestamps in the last minute
     for i in range(5):
-        test_data = json.dumps({"value": i * 10})
+        value = i * 10
         timestamp = now - timedelta(seconds=i * 10)
         test_db.execute(
-            'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
-            (batch_id, test_data, timestamp)
+            'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
+            (i + 1, batch_id, timestamp, value)
         )
 
     # Verify data count
@@ -66,14 +65,12 @@ async def test_data_aggregation(test_db, clean_tasks):
 
     # Verify data ordering
     results = test_db.execute(
-        'SELECT data FROM data WHERE batch_id = ? ORDER BY timestamp DESC',
+        'SELECT value FROM data WHERE batch_id = ? ORDER BY timestamp DESC',
         [batch_id]
     ).fetchall()
     assert len(results) == 5
     for i, row in enumerate(results):
-        data = json.loads(row[0])
-        assert "value" in data
-        assert data["value"] == i * 10  # Values should match the order we inserted them
+        assert row[0] == (4 - i) * 10  # Values should be in reverse order due to DESC
 
 @pytest.mark.asyncio
 async def test_data_cleanup(test_db, clean_tasks):
@@ -83,8 +80,8 @@ async def test_data_cleanup(test_db, clean_tasks):
 
     # Insert some test data
     test_db.execute(
-        'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
-        (batch_id, json.dumps({"value": 1}), current_time)
+        'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
+        (1, batch_id, current_time, 42)
     )
 
     # Verify data exists
@@ -111,10 +108,10 @@ async def test_concurrent_batch_isolation(test_db, clean_tasks):
     current_time = datetime.now()
 
     # Insert data for different batches
-    for batch_id in batch_ids:
+    for i, batch_id in enumerate(batch_ids):
         test_db.execute(
-            'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
-            (batch_id, json.dumps({"value": 42}), current_time)
+            'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
+            (i + 1, batch_id, current_time, 42)
         )
 
     # Verify each batch has correct data
@@ -126,8 +123,8 @@ async def test_concurrent_batch_isolation(test_db, clean_tasks):
         assert result[0] == 1
 
         # Verify data content
-        data = test_db.execute(
-            'SELECT data FROM data WHERE batch_id = ?',
+        value = test_db.execute(
+            'SELECT value FROM data WHERE batch_id = ?',
             [batch_id]
         ).fetchone()
-        assert json.loads(data[0])["value"] == 42
+        assert value[0] == 42

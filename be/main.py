@@ -83,51 +83,43 @@ async def insert_task(batch_id: str):
     """Insert random data for a batch."""
     print(f"Starting task for batch {batch_id}")
     try:
-        # Initial data insertion to mark task as started
-        print(f"Inserting initial data for batch {batch_id}")
-        try:
-            value = random.randint(0, 100)
-            app.state.db.execute(
-                'INSERT INTO data (id, batch_id, data, timestamp) VALUES (?, ?, ?, ?)',
-                (value, batch_id, dumps({"value": value}), datetime.now())
-            )
-            # Add initial delay to ensure task is running during test assertions
-            await asyncio.sleep(0.2)
-        except Exception as e:
-            print(f"Error inserting initial data for batch {batch_id}: {str(e)}")
-            if batch_id in app.state.tasks:
-                app.state.tasks.pop(batch_id)
-            raise
-
-        while True:
-            try:
-                value = random.randint(0, 100)
-                app.state.db.execute(
-                    'INSERT INTO data (id, batch_id, data, timestamp) VALUES (?, ?, ?, ?)',
-                    (value, batch_id, dumps({"value": value}), datetime.now())
+        # Initialize database connection if not exists
+        if not hasattr(app.state, 'db'):
+            app.state.db = duckdb.connect(':memory:')
+            app.state.db.execute('''
+                CREATE TABLE IF NOT EXISTS data (
+                    id INTEGER PRIMARY KEY,
+                    batch_id VARCHAR,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    value INTEGER
                 )
-                await asyncio.sleep(0.1)
-            except asyncio.CancelledError:
-                print(f"Task {batch_id} cancelled during execution")
-                if batch_id in app.state.tasks:
-                    app.state.tasks.pop(batch_id)
-                raise
-            except Exception as e:
-                print(f"Error in task {batch_id}: {str(e)}")
-                if batch_id in app.state.tasks:
-                    app.state.tasks.pop(batch_id)
-                raise
+            ''')
 
-    except asyncio.CancelledError:
-        print(f"Task {batch_id} cancelled during startup")
-        if batch_id in app.state.tasks:
-            app.state.tasks.pop(batch_id)
-        raise
+        print(f"Inserting initial data for batch {batch_id}")
+        # Insert initial data
+        value = random.randint(1, 100)
+        app.state.db.execute(
+            'INSERT INTO data (id, batch_id, value) VALUES (?, ?, ?)',
+            (random.randint(1, 1000000), batch_id, value)
+        )
+
+        # Simulate long-running task
+        await asyncio.sleep(2)
+
+        # Insert more data
+        for _ in range(5):
+            value = random.randint(1, 100)
+            app.state.db.execute(
+                'INSERT INTO data (id, batch_id, value) VALUES (?, ?, ?)',
+                (random.randint(1, 1000000), batch_id, value)
+            )
+            await asyncio.sleep(0.5)
+
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
-        if batch_id in app.state.tasks:
-            app.state.tasks.pop(batch_id)
-        raise
+        raise e
+    finally:
+        print(f"Task {batch_id} completed")
 
 
 @app.post("/stream/{batch_id}")
@@ -214,18 +206,15 @@ async def get_tasks():
     if not hasattr(app.state, 'tasks'):
         app.state.tasks = {}
 
-    active_tasks = {
-        batch_id: not task.done()
-        for batch_id, task in app.state.tasks.items()
-    }
+    # Create a dictionary of task status
+    task_status = {}
+    for batch_id, task in app.state.tasks.items():
+        task_status[batch_id] = not task.done()
 
-    return JSONResponse(
-        status_code=200,
-        content={
-            "status": "success",
-            "tasks": active_tasks
-        }
-    )
+    return {
+        "status": "success",
+        "tasks": task_status
+    }
 
 
 @app.get("/agg")
