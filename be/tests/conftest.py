@@ -1,5 +1,6 @@
 import asyncio
 import pytest
+import pytest_asyncio
 import duckdb
 from fastapi.testclient import TestClient
 from main import app
@@ -45,7 +46,7 @@ class AsyncDuckDBConnection:
         """Async context manager exit."""
         await self.close()
 
-@pytest.fixture(scope="function")
+@pytest_asyncio.fixture(scope="function")
 async def setup_app():
     """Set up the FastAPI test application."""
     app.state.tasks = {}  # Initialize tasks dictionary
@@ -64,7 +65,7 @@ def test_client():
     """Create a test client."""
     return TestClient(app)
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(scope="function")
 async def clean_tasks():
     """Clean up tasks after each test."""
     # Setup - ensure tasks dictionary exists
@@ -90,9 +91,10 @@ async def clean_tasks():
 
         app.state.tasks.clear()
 
-@pytest.fixture
+@pytest_asyncio.fixture(scope="function")
 async def test_db(setup_app):
     """Create a test database connection."""
+    print("Setting up test database...")  # Debug logging
     # Create a new in-memory database for each test
     conn = duckdb.connect(':memory:')
     conn.execute('''
@@ -103,10 +105,15 @@ async def test_db(setup_app):
             value INTEGER
         )
     ''')
-    async with AsyncDuckDBConnection(conn) as db:
-        app.state.db = db  # Set the database in app state before yielding
-        try:
-            yield db
-        finally:
-            if hasattr(app.state, 'db'):
-                delattr(app.state, 'db')
+    db = AsyncDuckDBConnection(conn)
+    print("Database initialized, setting up app state...")  # Debug logging
+    app.state.db = db
+    await db.__aenter__()  # Ensure proper async context initialization
+    try:
+        print("Yielding database connection...")  # Debug logging
+        yield db
+    finally:
+        print("Cleaning up database connection...")  # Debug logging
+        await db.__aexit__(None, None, None)
+        if hasattr(app.state, 'db'):
+            delattr(app.state, 'db')
