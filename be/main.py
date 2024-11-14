@@ -121,18 +121,20 @@ async def insert_task(batch_id: str):
         value = (4 - i) * 10  # Values: 40, 30, 20, 10, 0
         values.append((i + 1, batch_id, timestamp, value))
 
-    # Insert all values
-    async with app.state.db.cursor() as cursor:
-        for id_, batch, ts, val in values:
-            await cursor.execute(
-                'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
-                (id_, batch, ts, val)
-            )
-        await app.state.db.commit()
-
-    # Short sleep to simulate work
-    await asyncio.sleep(0.1)
-    return True
+    try:
+        # Insert all values in a single transaction
+        async with app.state.db.cursor() as cursor:
+            await cursor.execute('BEGIN')
+            for id_, batch, ts, val in values:
+                await cursor.execute(
+                    'INSERT INTO data (id, batch_id, timestamp, value) VALUES (?, ?, ?, ?)',
+                    (id_, batch, ts, val)
+                )
+            await cursor.execute('COMMIT')
+        return True
+    except Exception as e:
+        print(f"Error inserting data for batch {batch_id}: {str(e)}")
+        raise
 
 async def _insert_task_impl(batch_id: str):
     """Implementation of the task that inserts data."""
@@ -140,9 +142,15 @@ async def _insert_task_impl(batch_id: str):
         print(f"Inserting data for batch {batch_id}")
         if batch_id == "test_batch_error":
             raise RuntimeError("Test error")
-        success = await insert_task(batch_id)
+
+        # Use asyncio shield to prevent cancellation during database operations
+        success = await asyncio.shield(insert_task(batch_id))
         print(f"Data insertion completed for batch {batch_id}")
         return success
+    except asyncio.CancelledError:
+        print(f"Task {batch_id} was cancelled")
+        # Re-raise to ensure proper cleanup
+        raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
         raise  # Re-raise the exception to be caught by task_done_callback
@@ -169,19 +177,24 @@ async def start(batch_id: str):
     # Check if task already exists and is running
     if batch_id in app.state.tasks:
         task = app.state.tasks[batch_id]
-        if isinstance(task, asyncio.Task) and not task.done():
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "status": "error",
-                    "detail": f"Task for batch {batch_id} already exists"
-                }
-            )
-        else:
-            # Clean up completed/failed task
-            del app.state.tasks[batch_id]
+        if isinstance(task, asyncio.Task):
+            if not task.done():
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "status": "error",
+                        "detail": f"Task for batch {batch_id} already exists"
+                    }
+                )
+            else:
+                # Clean up completed/failed task
+                try:
+                    await task
+                except Exception:
+                    pass
+                del app.state.tasks[batch_id]
 
-    # Check concurrent task limit
+    # Check concurrent task limit before creating new task
     active_tasks = sum(
         1 for task in app.state.tasks.values()
         if isinstance(task, asyncio.Task) and not task.done()
@@ -195,18 +208,51 @@ async def start(batch_id: str):
             }
         )
 
-    async def task_done_callback(task):
-        """Handle task completion and cleanup."""
+    try:
+        # Create and start the task
+        task = asyncio.create_task(_insert_task_impl(batch_id))
+        app.state.tasks[batch_id] = task
+
+        # Add done callback
+        async def task_done_callback(t):
+            """Handle task completion and cleanup."""
+            try:
+                await t
+                print(f"Task {batch_id} completed successfully")
+            except asyncio.CancelledError:
+                print(f"Task {batch_id} was cancelled")
+                # Keep cancelled tasks in state
+                return
+            except Exception as e:
+                print(f"Task {batch_id} failed: {str(e)}")
+                # Return error status for failed tasks
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "status": "error",
+                        "detail": str(e)
+                    }
+                )
+            finally:
+                # Only remove successfully completed tasks
+                if t.done() and not t.cancelled() and t.exception() is None:
+                    if batch_id in app.state.tasks:
+                        del app.state.tasks[batch_id]
+
+        task.add_done_callback(
+            lambda t: asyncio.create_task(task_done_callback(t))
+        )
+
+        # Wait a short time to catch immediate failures
         try:
-            await task
-            print(f"Task {batch_id} completed successfully")
-        except asyncio.CancelledError:
-            print(f"Task {batch_id} was cancelled")
-            # Don't remove cancelled tasks from state
-            return
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+        except asyncio.TimeoutError:
+            # Task is still running, which is expected
+            pass
         except Exception as e:
-            print(f"Task {batch_id} failed: {str(e)}")
-            # Return error response for failed tasks
+            # Task failed immediately
+            if batch_id in app.state.tasks:
+                del app.state.tasks[batch_id]
             return JSONResponse(
                 status_code=500,
                 content={
@@ -214,21 +260,6 @@ async def start(batch_id: str):
                     "detail": str(e)
                 }
             )
-        finally:
-            # Only remove completed tasks
-            if not isinstance(task.exception(), asyncio.CancelledError):
-                if batch_id in app.state.tasks:
-                    del app.state.tasks[batch_id]
-
-    try:
-        # Create and start the task
-        task = asyncio.create_task(_insert_task_impl(batch_id))
-        app.state.tasks[batch_id] = task
-
-        # Add done callback
-        task.add_done_callback(
-            lambda t: asyncio.create_task(task_done_callback(t))
-        )
 
         return JSONResponse(
             status_code=200,
@@ -238,6 +269,7 @@ async def start(batch_id: str):
             }
         )
     except Exception as e:
+        print(f"Error starting task {batch_id}: {str(e)}")
         if batch_id in app.state.tasks:
             del app.state.tasks[batch_id]
         return JSONResponse(
@@ -266,34 +298,19 @@ async def get_tasks():
         app.state.tasks = {}
 
     task_statuses = {}
-    tasks_to_remove = []
-
     for batch_id, task in app.state.tasks.items():
-        if not isinstance(task, asyncio.Task):
-            tasks_to_remove.append(batch_id)
-            continue
-
-        if task.done():
-            try:
-                task.result()
-                task_statuses[batch_id] = True  # Completed successfully
-            except asyncio.CancelledError:
-                task_statuses[batch_id] = False  # Task was cancelled
-            except Exception as e:
-                task_statuses[batch_id] = False  # Task failed
-            tasks_to_remove.append(batch_id)
-        else:
-            task_statuses[batch_id] = True  # Task is running
-
-    # Remove completed/failed tasks
-    for batch_id in tasks_to_remove:
-        if batch_id in app.state.tasks:
-            del app.state.tasks[batch_id]
+        if isinstance(task, asyncio.Task):
+            status = {
+                "running": not task.done(),
+                "completed": task.done() and not task.cancelled() and task.exception() is None,
+                "failed": task.done() and not task.cancelled() and task.exception() is not None,
+                "cancelled": task.cancelled()
+            }
+            task_statuses[batch_id] = status
 
     return JSONResponse(
         status_code=200,
         content={
-            "status": "success",
             "tasks": task_statuses
         }
     )
@@ -301,11 +318,53 @@ async def get_tasks():
 
 @app.get("/agg")
 async def agg():
-    """Aggregate data from the database (not implemented)."""
-    return JSONResponse(
-        status_code=501,
-        content={
-            "status": "error",
-            "detail": "Not implemented"
-        }
-    )
+    """Aggregate data from the database."""
+    if not hasattr(app.state, 'db'):
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": "Database not initialized"
+            }
+        )
+
+    try:
+        async with app.state.db.cursor() as cursor:
+            # Get aggregated data ordered by timestamp
+            await cursor.execute('''
+                SELECT batch_id,
+                       COUNT(*) as count,
+                       AVG(value) as avg_value,
+                       MIN(value) as min_value,
+                       MAX(value) as max_value
+                FROM data
+                GROUP BY batch_id
+                ORDER BY MIN(timestamp) DESC
+            ''')
+            rows = await cursor.fetchall()
+
+            results = []
+            for row in rows:
+                results.append({
+                    "batch_id": row[0],
+                    "count": row[1],
+                    "avg_value": float(row[2]),
+                    "min_value": row[3],
+                    "max_value": row[4]
+                })
+
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "success",
+                    "aggregations": results
+                }
+            )
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "detail": str(e)
+            }
+        )
