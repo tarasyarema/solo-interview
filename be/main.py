@@ -73,31 +73,32 @@ async def insert_task(batch_id: str):
     print(f"Starting task for batch {batch_id}")
     inserted = False
     try:
+        # First insert - ensure at least one value is inserted
+        value = random.randint(0, 100)
+        if not hasattr(app.state, 'db'):
+            raise RuntimeError("Database connection not available")
+
+        print(f"Inserting initial data for batch {batch_id}")
+        app.state.db.execute(
+            'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
+            (batch_id, dumps({"value": value}), datetime.now())
+        )
+        inserted = True
+
+        # Now enter the continuous insertion loop
         while True:
-            # Check if task is cancelled before sleeping
+            # Only check cancellation after first insert
             current_task = asyncio.current_task()
             if current_task and current_task.cancelled():
-                # Only break if we've inserted at least one value
-                if inserted:
-                    break
-                # Otherwise, continue to ensure we insert at least once
-                continue
+                break
 
-            # Insert at least one value before potentially being cancelled
             value = random.randint(0, 100)
-
-            # Ensure we have access to the database connection
-            if not hasattr(app.state, 'db'):
-                raise RuntimeError("Database connection not available")
-
             print(f"Inserting data for batch {batch_id}")
             app.state.db.execute(
                 'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
                 (batch_id, dumps({"value": value}), datetime.now())
             )
-            inserted = True
 
-            # Only sleep after first insert
             await asyncio.sleep(0.25)
 
     except asyncio.CancelledError:
