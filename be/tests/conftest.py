@@ -53,6 +53,9 @@ def test_db():
         )
     """)
 
+    # Clean up any existing data
+    db_conn.execute('DELETE FROM data')
+
     # Create async wrapper and set it as app state
     test_conn = AsyncDuckDBConnection(db_conn)
     app.state.db = test_conn

@@ -71,7 +71,7 @@ async def get_tasks():
 
 async def insert_task(batch_id: str):
     try:
-        while True:
+        while not asyncio.current_task().cancelled():
             await asyncio.sleep(0.25)
             value = random.randint(0, 100)
 
@@ -82,10 +82,13 @@ async def insert_task(batch_id: str):
             print(f"Inserting data for batch {batch_id}")
             app.state.db.execute(
                 'INSERT INTO data (batch_id, data, timestamp) VALUES (?, ?, ?)',
-                (batch_id, dumps({"key": value}), datetime.now())
+                (batch_id, dumps({"value": value}), datetime.now())
             )
     except asyncio.CancelledError:
         print(f"Task {batch_id} was cancelled")
+        # Remove the task from the tasks dict
+        if batch_id in tasks:
+            del tasks[batch_id]
         raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
@@ -126,10 +129,15 @@ async def stream(batch_id: str):
         raise HTTPException(status_code=404, detail="Task not found")
 
     async def _gen():
-        i = 0
         while True:
-            yield f"data: {dumps({'value': i})}\n\n"
-            i += 1
+            # Get the latest data for this batch
+            result = app.state.db.execute(
+                'SELECT data FROM data WHERE batch_id = ? ORDER BY timestamp DESC LIMIT 1',
+                [batch_id]
+            ).fetchone()
+
+            if result:
+                yield f"data: {result[0]}\n\n"
             await asyncio.sleep(0.1)
 
     return StreamingResponse(_gen(), media_type="text/event-stream")
