@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 import duckdb
 from pathlib import Path
 import os
-from main import app, db, tasks
+from main import app, tasks
 
 @pytest.fixture(scope="function")
 def test_client():
