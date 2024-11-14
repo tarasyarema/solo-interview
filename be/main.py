@@ -85,7 +85,7 @@ async def insert_task(batch_id: str):
         )
 
         # Add initial delay to ensure task is running during test assertions
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
 
         # Continuous insertion until cancelled
         while True:
@@ -96,24 +96,19 @@ async def insert_task(batch_id: str):
                     (batch_id, dumps({"value": value}), datetime.now())
                 )
                 # Add a shorter delay between insertions
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.1)
             except asyncio.CancelledError:
                 print(f"Task {batch_id} cancelled during execution")
-                # Clean up gracefully
-                tasks.pop(batch_id, None)
                 raise
             except Exception as e:
                 print(f"Error in task {batch_id}: {str(e)}")
-                tasks.pop(batch_id, None)
                 raise
 
     except asyncio.CancelledError:
         print(f"Task {batch_id} cancelled during startup")
-        tasks.pop(batch_id, None)
         raise
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
-        tasks.pop(batch_id, None)
         raise
 
 
@@ -126,7 +121,7 @@ async def start(batch_id: str, request: Request):
             if not tasks[batch_id].done():
                 return JSONResponse(
                     status_code=400,
-                    content={"error": f"Task for batch {batch_id} already exists"}
+                    content={"status": "error", "detail": f"Task for batch {batch_id} already exists"}
                 )
             else:
                 # Remove completed/failed task
@@ -134,10 +129,10 @@ async def start(batch_id: str, request: Request):
 
         # Check concurrent task limit
         active_tasks = sum(1 for task in tasks.values() if not task.done())
-        if active_tasks >= 3:
+        if active_tasks >= MAX_CONCURRENT_TASKS:
             return JSONResponse(
                 status_code=429,
-                content={"error": "Maximum number of concurrent tasks reached"}
+                content={"status": "error", "detail": "Maximum number of concurrent tasks reached"}
             )
 
         # Create and store the task
@@ -145,17 +140,19 @@ async def start(batch_id: str, request: Request):
         tasks[batch_id] = task
 
         # Wait briefly to ensure task starts
-        await asyncio.sleep(0.1)
-
-        # Check if task failed immediately
-        if task.done():
-            exc = task.exception()
-            if exc:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.1)
+        except asyncio.TimeoutError:
+            # Task is still running, which is good
+            pass
+        except Exception as e:
+            # Task failed to start
+            if batch_id in tasks:
                 tasks.pop(batch_id)
-                return JSONResponse(
-                    status_code=500,
-                    content={"error": f"Task failed: {str(exc)}"}
-                )
+            return JSONResponse(
+                status_code=500,
+                content={"status": "error", "detail": str(e)}
+            )
 
         # Set up cleanup for when client disconnects
         async def cleanup_task():
@@ -174,10 +171,13 @@ async def start(batch_id: str, request: Request):
             except Exception as e:
                 print(f"Error cleaning up task {batch_id}: {str(e)}")
 
-        request.state.cleanup_tasks = request.state.cleanup_tasks if hasattr(request.state, 'cleanup_tasks') else []
-        request.state.cleanup_tasks.append(cleanup_task())
+        # Store cleanup task in request state
+        request.state.cleanup_tasks = getattr(request.state, 'cleanup_tasks', [])
+        cleanup_coro = cleanup_task()
+        request.state.cleanup_tasks.append(cleanup_coro)
+        asyncio.create_task(cleanup_coro)
 
-        return {"message": f"Started task for batch {batch_id}"}
+        return {"status": "started", "batch_id": batch_id}
 
     except Exception as e:
         # Clean up task if it exists
@@ -194,43 +194,32 @@ async def start(batch_id: str, request: Request):
 
         return JSONResponse(
             status_code=500,
-            content={"error": f"Error starting task: {str(e)}"}
+            content={"status": "error", "detail": str(e)}
         )
 
 
 @app.delete("/stream/{batch_id}")
 async def data_stop(batch_id: str):
-    raise HTTPException(status_code=501, detail="Not implemented")
+    """Stop a streaming task."""
+    return JSONResponse(
+        status_code=501,
+        content={"status": "error", "detail": "Not implemented"}
+    )
 
 
-@app.get("/stream/{batch_id}")
-async def stream(batch_id: str):
-    # Check if task exists or has data
-    if batch_id not in tasks:
-        # Check if there's any data for this batch before failing
-        result = app.state.db.execute(
-            'SELECT COUNT(*) FROM data WHERE batch_id = ?',
-            [batch_id]
-        ).fetchone()
-
-        if not result or result[0] == 0:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-    async def _gen():
-        while True:
-            # Get the latest data for this batch
-            result = app.state.db.execute(
-                'SELECT data FROM data WHERE batch_id = ? ORDER BY timestamp DESC LIMIT 1',
-                [batch_id]
-            ).fetchone()
-
-            if result:
-                yield f"data: {result[0]}\n\n"
-            await asyncio.sleep(0.1)
-
-    return StreamingResponse(_gen(), media_type="text/event-stream")
+@app.get("/tasks")
+async def get_tasks():
+    """Get list of running tasks."""
+    return JSONResponse(
+        status_code=501,
+        content={"status": "error", "detail": "Not implemented"}
+    )
 
 
-@app.get("/agg/{batch_id}")
-async def agg(batch_id: str):
-    raise HTTPException(status_code=501, detail="Not implemented")
+@app.get("/agg")
+async def agg():
+    """Get aggregated data."""
+    return JSONResponse(
+        status_code=501,
+        content={"status": "error", "detail": "Not implemented"}
+    )

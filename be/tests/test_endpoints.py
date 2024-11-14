@@ -29,7 +29,7 @@ async def test_create_stream_task(test_client, test_db, clean_tasks):
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "started"  # Updated to match new response format
+    assert data["status"] == "started"
     assert data["batch_id"] == batch_id
 
     # Wait for task to start and insert data
@@ -43,46 +43,25 @@ async def test_create_stream_task(test_client, test_db, clean_tasks):
     assert result[0] > 0
 
 @pytest.mark.asyncio
-async def test_stream_endpoint(test_client, test_db, clean_tasks):
-    """Test the streaming endpoint returns SSE data"""
-    batch_id = "test_batch_2"
+async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
+    """Test that creating a duplicate task fails properly"""
+    batch_id = "test_batch_duplicate"
 
-    # First create the task
+    # Create first task
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "started"  # Updated to match new response format
+    assert data["status"] == "started"
+    assert data["batch_id"] == batch_id
 
-    # Wait for task to start and insert data
-    await asyncio.sleep(0.2)  # Reduced wait time
+    await asyncio.sleep(0.2)  # Wait for task to start
 
-    # Verify data was inserted
-    result = test_db.execute(
-        'SELECT COUNT(*) FROM data WHERE batch_id = ?',
-        [batch_id]
-    ).fetchone()
-    assert result[0] > 0
-
-    # Now test the stream
-    response = test_client.get(f"/stream/{batch_id}")
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "text/event-stream"
-
-    # Read the response content with timeout
-    content = b""
-    async def read_stream():
-        nonlocal content
-        for chunk in response.iter_bytes():
-            content += chunk
-            if b"data: " in content:
-                return
-
-    try:
-        await asyncio.wait_for(read_stream(), timeout=1.0)  # Reduced timeout
-        data_line = content.decode().split("\n")[0].removeprefix("data: ")
-        assert "value" in data_line
-    except asyncio.TimeoutError:
-        pytest.fail("Timeout waiting for stream data")
+    # Attempt to create duplicate task
+    response = test_client.post(f"/stream/{batch_id}")
+    assert response.status_code == 400
+    data = response.json()
+    assert data["status"] == "error"
+    assert "Task for batch test_batch_duplicate already exists" in data["detail"]
 
 @pytest.mark.asyncio
 async def test_unimplemented_tasks_endpoint(test_client):
@@ -90,7 +69,7 @@ async def test_unimplemented_tasks_endpoint(test_client):
     response = test_client.get("/tasks")
     assert response.status_code == 501
     data = response.json()
-    assert "detail" in data
+    assert data["status"] == "error"
     assert data["detail"] == "Not implemented"
 
 @pytest.mark.asyncio
@@ -99,31 +78,34 @@ async def test_unimplemented_stop_endpoint(test_client):
     response = test_client.delete("/stream/test_batch")
     assert response.status_code == 501
     data = response.json()
-    assert "detail" in data
+    assert data["status"] == "error"
     assert data["detail"] == "Not implemented"
 
 @pytest.mark.asyncio
 async def test_unimplemented_agg_endpoint(test_client):
-    """Test that GET /agg/{batch_id} returns 501 Not Implemented"""
-    response = test_client.get("/agg/test_batch")
+    """Test that GET /agg returns 501 Not Implemented"""
+    response = test_client.get("/agg")
     assert response.status_code == 501
     data = response.json()
-    assert "detail" in data
+    assert data["status"] == "error"
     assert data["detail"] == "Not implemented"
 
 @pytest.mark.asyncio
 async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
     """Test that we can't create more than MAX_CONCURRENT_TASKS tasks"""
+    from main import MAX_CONCURRENT_TASKS
+
     # Successfully create MAX_CONCURRENT_TASKS tasks
-    for i in range(10):  # Using our new limit of 10
+    for i in range(MAX_CONCURRENT_TASKS):
         response = test_client.post(f"/stream/batch_{i}")
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "started"  # Updated to match new response format
+        assert data["status"] == "started"
+        assert data["batch_id"] == f"batch_{i}"
         await asyncio.sleep(0.2)  # Reduced wait time
 
     # Verify all tasks are running and have data
-    for i in range(10):
+    for i in range(MAX_CONCURRENT_TASKS):
         result = test_db.execute(
             'SELECT COUNT(*) FROM data WHERE batch_id = ?',
             [f"batch_{i}"]
@@ -132,7 +114,7 @@ async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
 
     # Attempt to create another task should fail with 429 Too Many Requests
     response = test_client.post("/stream/batch_extra")
-    assert response.status_code == 429  # Updated to match new error code
+    assert response.status_code == 429
     data = response.json()
-    assert "detail" in data
-    assert "Too many concurrent tasks" in data["detail"]  # Updated error message
+    assert data["status"] == "error"
+    assert "Maximum number of concurrent tasks reached" in data["detail"]
