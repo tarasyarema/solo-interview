@@ -102,69 +102,56 @@ async def insert_task(batch_id: str):
                 await asyncio.sleep(1.0)
             except asyncio.CancelledError:
                 print(f"Task {batch_id} was cancelled")
-                if batch_id in tasks:
-                    del tasks[batch_id]
                 break
 
     except Exception as e:
         print(f"Error in task {batch_id}: {str(e)}")
-        if batch_id in tasks:
-            del tasks[batch_id]
         raise
     finally:
-        # Only clean up if task failed before first insertion
-        if not inserted and batch_id in tasks:
-            del tasks[batch_id]
         print(f"Task {batch_id} completed")
 
 
-@app.post("/stream/{batch_id}")
+@app.post("/stream/{batch_id}", status_code=200)
 async def start(batch_id: str):
     """Start a new streaming task."""
-    # Clean up completed tasks first
-    for task_id, task in list(tasks.items()):
-        if task.done():
-            del tasks[task_id]
-
-    if batch_id in tasks:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": f"Task {batch_id} already exists"}
-        )
-
-    active_tasks = len([t for t in tasks.values() if not t.done()])
-    if active_tasks >= MAX_CONCURRENT_TASKS:
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Too many concurrent tasks"}
-        )
-
     try:
+        # Check if task already exists
+        if batch_id in tasks:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": f"Task {batch_id} already exists"}
+            )
+
+        # Clean up completed tasks
+        completed_tasks = [bid for bid, task in tasks.items() if task.done()]
+        for bid in completed_tasks:
+            del tasks[bid]
+
+        # Check concurrent task limit
+        active_tasks = len([task for task in tasks.values() if not task.done()])
+        if active_tasks >= MAX_CONCURRENT_TASKS:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many concurrent tasks"}
+            )
+
         # Create and store the task
         task = asyncio.create_task(insert_task(batch_id))
         tasks[batch_id] = task
 
-        # Give the task a moment to start and potentially fail
-        await asyncio.sleep(0.1)
-
-        # Check if the task failed immediately
-        if task.done():
-            if task.exception():
-                exc = task.exception()
-                if batch_id in tasks:
+        # Set up task cleanup
+        def cleanup_task(t):
+            try:
+                # Only remove if task is done and batch_id still exists
+                if t.done() and batch_id in tasks:
                     del tasks[batch_id]
-                return JSONResponse(
-                    status_code=500,
-                    content={"detail": str(exc)}
-                )
+            except Exception as e:
+                print(f"Error cleaning up task {batch_id}: {str(e)}")
 
-        return JSONResponse(
-            status_code=200,
-            content={
-                "status": "started",
-                "batch_id": batch_id
-            }
-        )
+        task.add_done_callback(cleanup_task)
+
+        return {"status": "started", "batch_id": batch_id}
+
     except Exception as e:
         if batch_id in tasks:
             del tasks[batch_id]
