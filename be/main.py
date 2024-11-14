@@ -127,7 +127,7 @@ async def insert_task(batch_id: str) -> bool:
         for i in range(5):
             # Use deterministic values for testing
             value = (4 - i) * 10  # Will generate: 40, 30, 20, 10, 0
-            timestamp = datetime.datetime.now() - datetime.timedelta(minutes=i)
+            timestamp = datetime.now() - timedelta(minutes=i)
             values.append((
                 str(uuid.uuid4()),
                 batch_id,
@@ -298,6 +298,7 @@ async def start(batch_id: str):
 
         return {
             "status": "started",
+            "batch_id": batch_id,
             "detail": f"Started streaming task for batch {batch_id}"
         }
 
