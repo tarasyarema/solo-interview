@@ -107,6 +107,10 @@ def test_db():
 @pytest.fixture(autouse=True)
 async def clean_tasks():
     """Clean up tasks after each test."""
+    # Setup - ensure tasks dictionary exists
+    if not hasattr(app.state, 'tasks'):
+        app.state.tasks = {}
+
     yield
 
     # Clean up any remaining tasks
@@ -116,9 +120,14 @@ async def clean_tasks():
             if isinstance(task, asyncio.Task) and not task.done():
                 task.cancel()
                 try:
-                    await task
-                except asyncio.CancelledError:
+                    await asyncio.wait_for(task, timeout=0.5)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
                 except Exception as e:
                     print(f"Error cleaning up task: {str(e)}")
+
+        # Clear all tasks after cleanup
         app.state.tasks.clear()
+
+        # Wait a bit to ensure all tasks are properly cleaned up
+        await asyncio.sleep(0.1)

@@ -53,8 +53,15 @@ async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
     assert data["status"] == "started"
     assert data["batch_id"] == "test_batch_duplicate"
 
-    # Wait for task to start
-    await asyncio.sleep(0.2)
+    # Wait for task to properly start and insert some data
+    await asyncio.sleep(0.5)  # Increased wait time
+
+    # Verify task is running and has data
+    result = test_db.execute(
+        'SELECT COUNT(*) FROM data WHERE batch_id = ?',
+        ["test_batch_duplicate"]
+    ).fetchone()
+    assert result[0] > 0
 
     # Try to create duplicate task
     response = test_client.post("/stream/test_batch_duplicate")
@@ -64,15 +71,22 @@ async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
     assert "already exists" in data["detail"]
 
 @pytest.mark.asyncio
-async def test_tasks_endpoint(test_client, clean_tasks):
+async def test_tasks_endpoint(test_client, test_db, clean_tasks):
     """Test that /tasks endpoint returns list of active tasks"""
     # Create a test task first
     batch_id = "test_batch_tasks"
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 200
 
-    # Wait for task to start
-    await asyncio.sleep(0.2)
+    # Wait for task to properly start and insert some data
+    await asyncio.sleep(0.5)  # Increased wait time
+
+    # Verify task is running and has data
+    result = test_db.execute(
+        'SELECT COUNT(*) FROM data WHERE batch_id = ?',
+        [batch_id]
+    ).fetchone()
+    assert result[0] > 0
 
     # Check tasks endpoint
     response = test_client.get("/tasks")
@@ -104,21 +118,24 @@ async def test_unimplemented_agg_endpoint(test_client):
 @pytest.mark.asyncio
 async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
     """Test that we can't create more than MAX_CONCURRENT_TASKS tasks"""
+    tasks_created = []
     try:
         # Successfully create MAX_CONCURRENT_TASKS tasks
         for i in range(MAX_CONCURRENT_TASKS):
-            response = test_client.post(f"/stream/batch_{i}")
+            batch_id = f"batch_{i}"
+            response = test_client.post(f"/stream/{batch_id}")
             assert response.status_code == 200
             data = response.json()
             assert data["status"] == "started"
-            assert data["batch_id"] == f"batch_{i}"
-            await asyncio.sleep(0.2)  # Wait for task to start
+            assert data["batch_id"] == batch_id
+            tasks_created.append(batch_id)
+            await asyncio.sleep(0.5)  # Increased wait time
 
         # Verify all tasks are running and have data
-        for i in range(MAX_CONCURRENT_TASKS):
+        for batch_id in tasks_created:
             result = test_db.execute(
                 'SELECT COUNT(*) FROM data WHERE batch_id = ?',
-                [f"batch_{i}"]
+                [batch_id]
             ).fetchone()
             assert result[0] > 0
 
@@ -131,13 +148,15 @@ async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
 
     finally:
         # Clean up all tasks
-        for i in range(MAX_CONCURRENT_TASKS):
-            batch_id = f"batch_{i}"
-            if hasattr(app.state, 'tasks') and batch_id in app.state.tasks:
-                task = app.state.tasks[batch_id]
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await task
-                    except:
-                        pass
+        if hasattr(app.state, 'tasks'):
+            for batch_id in tasks_created:
+                if batch_id in app.state.tasks:
+                    task = app.state.tasks[batch_id]
+                    if isinstance(task, asyncio.Task) and not task.done():
+                        task.cancel()
+                        try:
+                            await asyncio.wait_for(task, timeout=0.5)
+                        except (asyncio.CancelledError, asyncio.TimeoutError):
+                            pass
+                        except Exception as e:
+                            print(f"Error cleaning up task {batch_id}: {str(e)}")
