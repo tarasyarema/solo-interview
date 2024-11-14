@@ -89,9 +89,9 @@ def clean_tasks():
     cleanup_tasks()
     loop.close()
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def event_loop():
-    """Create and provide a new event loop for each test session."""
+    """Create and provide a new event loop for each test."""
     policy = asyncio.get_event_loop_policy()
     loop = policy.new_event_loop()
     yield loop

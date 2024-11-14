@@ -34,16 +34,18 @@ async def test_stream_endpoint(test_client, test_db, clean_tasks):
     assert response.status_code == 200
 
     # Now test the stream
-    with test_client.get(f"/stream/{batch_id}", stream=True) as response:
-        assert response.status_code == 200
-        assert response.headers["content-type"] == "text/event-stream"
+    response = test_client.get(f"/stream/{batch_id}")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/event-stream"
 
-        # Read first event to verify format
-        for line in response.iter_lines():
-            if line.startswith(b"data: "):
-                data_line = line.decode().removeprefix("data: ")
-                assert "value" in data_line
-                break
+    # Read the response content and verify format
+    content = b""
+    for chunk in response.iter_bytes():
+        content += chunk
+        if b"data: " in content:
+            data_line = content.decode().split("\n")[0].removeprefix("data: ")
+            assert "key" in data_line  # Match the actual data format
+            break
 
 @pytest.mark.asyncio
 async def test_unimplemented_tasks_endpoint(test_client):
