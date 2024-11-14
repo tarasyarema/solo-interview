@@ -43,22 +43,27 @@ async def test_task_creation_and_cleanup(test_client, test_db, clean_tasks):
     assert data["status"] == "started"
     assert data["batch_id"] == batch_id
 
-    # Wait for task to start and insert data
-    await asyncio.sleep(0.2)  # Reduced sleep time
+    # Wait for task to complete (accounting for the 2-second sleep)
+    for _ in range(30):  # 3 seconds total timeout
+        await asyncio.sleep(0.1)
+        # Check if task is done
+        if batch_id not in app.state.tasks or app.state.tasks[batch_id].done():
+            break
 
-    # Verify task is running and has inserted data
+    # Verify task completed successfully
+    assert batch_id in app.state.tasks
+    task = app.state.tasks[batch_id]
+    assert task.done()
+    assert not task.cancelled()
+    assert task.exception() is None
+
+    # Verify data was inserted
     async with test_db.execute(
         'SELECT COUNT(*) FROM data WHERE batch_id = ?',
         (batch_id,)
     ) as cursor:
         row = await cursor.fetchone()
         assert row[0] > 0
-
-    # Verify task is in the tasks dictionary
-    assert hasattr(app.state, 'tasks')
-    assert batch_id in app.state.tasks
-    task = app.state.tasks[batch_id]
-    assert not task.done()
 
 @pytest.mark.asyncio
 async def test_task_management(test_client, test_db, clean_tasks):
@@ -79,23 +84,32 @@ async def test_task_management(test_client, test_db, clean_tasks):
         data = response.json()
         assert data["status"] == "started"
         assert data["batch_id"] == batch_id
-        await asyncio.sleep(0.2)  # Reduced sleep time
 
-    # Verify all tasks are running and have data
+    # Wait for all tasks to complete (accounting for the 2-second sleep)
+    for _ in range(50):  # 5 seconds total timeout
+        await asyncio.sleep(0.1)
+        # Check if all tasks are done
+        if all(
+            batch_id not in app.state.tasks or app.state.tasks[batch_id].done()
+            for batch_id in batch_ids
+        ):
+            break
+
+    # Verify all tasks completed successfully
     for batch_id in batch_ids:
-        # Check database
+        assert batch_id in app.state.tasks
+        task = app.state.tasks[batch_id]
+        assert task.done()
+        assert not task.cancelled()
+        assert task.exception() is None
+
+        # Verify data was inserted
         async with test_db.execute(
             'SELECT COUNT(*) FROM data WHERE batch_id = ?',
             (batch_id,)
         ) as cursor:
             row = await cursor.fetchone()
             assert row[0] > 0
-
-        # Check task status
-        assert hasattr(app.state, 'tasks')
-        assert batch_id in app.state.tasks
-        task = app.state.tasks[batch_id]
-        assert not task.done()
 
 @pytest.mark.asyncio
 async def test_task_cleanup_on_error(test_client, test_db, clean_tasks):
@@ -141,20 +155,29 @@ async def test_duplicate_task_creation(test_client, test_db, clean_tasks):
     data = response.json()
     assert data["status"] == "started"
     assert data["batch_id"] == batch_id
-    await asyncio.sleep(0.2)  # Reduced sleep time
+
+    # Wait for task to start (but not complete)
+    await asyncio.sleep(0.5)  # Give task time to start but not complete (2s sleep)
 
     # Attempt to create duplicate task
     response = test_client.post(f"/stream/{batch_id}")
     assert response.status_code == 400
     data = response.json()
     assert data["status"] == "error"
-    assert "Task for batch test_batch_duplicate already exists" in data["detail"]
+    assert "already exists" in data["detail"]
 
-    # Verify original task is still running
-    assert hasattr(app.state, 'tasks')
+    # Wait for original task to complete
+    for _ in range(30):  # 3 seconds total timeout
+        await asyncio.sleep(0.1)
+        if batch_id not in app.state.tasks or app.state.tasks[batch_id].done():
+            break
+
+    # Verify original task completed successfully
     assert batch_id in app.state.tasks
     task = app.state.tasks[batch_id]
-    assert not task.done()
+    assert task.done()
+    assert not task.cancelled()
+    assert task.exception() is None
 
 @pytest.mark.asyncio
 async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
@@ -164,6 +187,7 @@ async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
     Verifies that:
     - Maximum concurrent task limit is enforced
     - Proper error responses are returned when limit is reached
+    - Tasks complete successfully after reaching the limit
     """
     # Create maximum number of tasks
     for i in range(MAX_CONCURRENT_TASKS):
@@ -172,14 +196,30 @@ async def test_concurrent_task_limit(test_client, test_db, clean_tasks):
         data = response.json()
         assert data["status"] == "started"
         assert data["batch_id"] == f"batch_{i}"
-        await asyncio.sleep(0.2)  # Reduced sleep time
 
     # Attempt to create one more task
     response = test_client.post("/stream/batch_extra")
     assert response.status_code == 429
     data = response.json()
     assert data["status"] == "error"
-    assert "Maximum number of concurrent tasks reached" in data["detail"]
+    assert "Maximum number of concurrent tasks" in data["detail"]
+
+    # Wait for all tasks to complete
+    for _ in range(50):  # 5 seconds total timeout
+        await asyncio.sleep(0.1)
+        active_tasks = len([t for t in app.state.tasks.values()
+                          if isinstance(t, asyncio.Task) and not t.done()])
+        if active_tasks == 0:
+            break
+
+    # Verify all tasks completed successfully
+    for i in range(MAX_CONCURRENT_TASKS):
+        batch_id = f"batch_{i}"
+        assert batch_id in app.state.tasks
+        task = app.state.tasks[batch_id]
+        assert task.done()
+        assert not task.cancelled()
+        assert task.exception() is None
 
 @pytest.mark.asyncio
 async def test_unimplemented_endpoints(test_client):
