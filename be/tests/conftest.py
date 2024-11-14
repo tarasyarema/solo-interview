@@ -7,11 +7,11 @@ import os
 from contextlib import asynccontextmanager
 from main import app, tasks
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 async def test_client():
     """Create a test client with its own event loop."""
-    async with TestClient(app) as client:
-        yield client
+    client = TestClient(app)
+    yield client
 
 class AsyncDuckDBConnection:
     """Wrapper for DuckDB connection to support async context manager for transactions."""
@@ -35,7 +35,7 @@ class AsyncDuckDBConnection:
     def close(self):
         self.conn.close()
 
-@pytest.fixture(scope="function")
+@pytest.fixture
 async def test_db():
     """Create a fresh test database for each test."""
     # Store the original database connection
@@ -100,12 +100,10 @@ async def clean_tasks():
                 pass
     tasks.clear()
 
+# Let pytest-asyncio handle the event loop
 @pytest.fixture(scope="session")
 def event_loop():
     """Create and provide a new event loop for each test session."""
-    policy = asyncio.get_event_loop_policy()
-    loop = policy.new_event_loop()
-    asyncio.set_event_loop(loop)
+    loop = asyncio.new_event_loop()
     yield loop
-    if not loop.is_closed():
-        loop.close()
+    loop.close()
