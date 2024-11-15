@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
 from json import dumps
-from datetime import datetime
+from datetime import datetime, timedelta
 import random
+import json
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,8 +10,6 @@ from fastapi.responses import StreamingResponse
 
 import duckdb
 import asyncio
-
-
 
 db: duckdb.DuckDBPyConnection
 tasks: dict[str, asyncio.Task] = {}
@@ -124,10 +123,44 @@ async def stream(batch_id: str):
 
     return StreamingResponse(_gen(), media_type="text/event-stream")
 
+""" I don't know if you want this live data, or just the index like above """
+""" @app.get("/stream/{batch_id}")
+async def stream(batch_id: str):
+    async def _gen():
+        sql = 'SELECT id, data FROM data WHERE batch_id = ? ORDER BY id DESC'
+        results = db.execute(sql, (batch_id,)).fetchall()
+
+        for id, data_json in results:
+            data = json.loads(data_json)
+            yield f"data: {json.dumps({'id': id, 'value': data['key']})}\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream") """
+
 
 @app.get("/agg/{batch_id}")
 async def agg(batch_id: str):
-    # Not implemented
-    raise HTTPException(status_code=501, detail="Not implemented")
-
-
+    # https://stackoverflow.com/questions/4541629/how-to-create-a-datetime-equal-to-15-minutes-ago
+    one_minute_ago = datetime.now() - timedelta(minutes=1)
+    
+    result = db.execute(f"""
+        SELECT
+            AVG(CAST(json_extract(data, '$.key') AS FLOAT)) AS average,
+            COUNT(*) AS count,
+            SUM(CAST(json_extract(data, '$.key') AS FLOAT)) AS sum
+        FROM data
+        WHERE batch_id = ? AND id >= ?
+    """, (batch_id, one_minute_ago.isoformat())).fetchone()
+    
+    if result:
+        average, count, sum = result    
+        return {
+            "average": average,
+            "count": count,
+            "sum": sum,
+        }
+    else:
+        return {
+            "average": 0,
+            "count": 0,
+            "sum": 0,
+        }
