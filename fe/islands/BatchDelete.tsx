@@ -16,6 +16,7 @@ export default function BatchDelete({ batchId }: Props) {
       if (!res.ok) {
         throw new Error("Error deleting batch");
       }
+      location.href = "/";
     } catch (e: any) {
       console.error(e);
     }

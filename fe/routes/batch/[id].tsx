@@ -3,8 +3,9 @@ import { API_URL } from "../api.ts";
 import Events from "../../islands/Events.tsx";
 import BatchDelete from "../../islands/BatchDelete.tsx";
 import Error404 from "../_404.tsx";
+import AggregatedData from "../../islands/AggregatedData.tsx";
 
-// ! BAD PRACTICE, using GET to trigger a POST request. Look at the BatchCreate.tsx where we use a POST request to create a new batch
+// ! BAD PRACTICE, using GET to trigger a POST request(and also in the back is a GET)
 /* export const handler: Handlers = {
   async GET(_req, ctx) {
     // Is this a good idea?
@@ -38,6 +39,7 @@ export default function BatchPage(props: PageProps) {
         </h1>
         <BatchDelete batchId={props.params.id} />
       </div>
+      <AggregatedData batchId={props.params.id} />
       <Events batchId={props.params.id} />
     </div>
   );

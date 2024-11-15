@@ -7,6 +7,7 @@ import * as $_app from "./routes/_app.tsx";
 import * as $api from "./routes/api.ts";
 import * as $batch_id_ from "./routes/batch/[id].tsx";
 import * as $index from "./routes/index.tsx";
+import * as $AggregatedData from "./islands/AggregatedData.tsx";
 import * as $BatchCreate from "./islands/BatchCreate.tsx";
 import * as $BatchDelete from "./islands/BatchDelete.tsx";
 import * as $Events from "./islands/Events.tsx";
@@ -22,6 +23,7 @@ const manifest = {
     "./routes/index.tsx": $index,
   },
   islands: {
+    "./islands/AggregatedData.tsx": $AggregatedData,
     "./islands/BatchCreate.tsx": $BatchCreate,
     "./islands/BatchDelete.tsx": $BatchDelete,
     "./islands/Events.tsx": $Events,
